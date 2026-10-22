@@ -17,7 +17,7 @@ import { TERMINAL_FONTS, DEFAULT_TERMINAL_FONT } from '../../themes/fonts';
 import { TerminalSchemePreview } from '../common/TerminalSchemePreview';
 import { SESSION_SAVED_EVENT, SessionSavedDetail, sessionLookFrom, MAX_PASTE_LINE_DELAY_MS, pasteLineDelayFrom, keepaliveSecondsFrom, keepaliveKeys } from '../../services/appEvents';
 
-type SessionTab = 'general' | 'credentials' | 'jump' | 'serial' | 'appearance' | 'advanced';
+export type SessionTab = 'general' | 'credentials' | 'jump' | 'serial' | 'appearance' | 'advanced';
 
 /** The hop command a router jump types (NX-OS syntax; the backend's default too). */
 const DEFAULT_HOP_COMMAND = 'ssh {user}@{host}';
@@ -41,6 +41,8 @@ interface NewSessionModalProps {
   savedSessions?: PuttySession[];
   /** A new session's folder, when opened from a folder's "New Session Here". */
   initialFolder?: string;
+  /** The tab to open on, e.g. Credentials from a terminal's "Add an enable password". */
+  initialTab?: SessionTab;
 }
 
 export const NewSessionModal: React.FC<NewSessionModalProps> = ({
@@ -50,6 +52,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
   editingSession,
   savedSessions = [],
   initialFolder,
+  initialTab,
 }) => {
   const [name, setName] = useState('');
   const [hostname, setHostname] = useState('');
@@ -67,8 +70,9 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
   const [selectedVaultKey, setSelectedVaultKey] = useState('');
   const [vaultKeyId, setVaultKeyId] = useState('');
   const [vaultPassword, setVaultPassword] = useState('');
-  const [isNetworkDevice, setIsNetworkDevice] = useState(false);
   const [vaultEnablePassword, setVaultEnablePassword] = useState('');
+  // "Remove" pressed on a saved enable password: dropped when saving.
+  const [removeEnable, setRemoveEnable] = useState(false);
   const [vaultSaveError, setVaultSaveError] = useState<string | null>(null);
   const [nameError, setNameError] = useState<string | null>(null);
   // The vault entry this session already uses, when editing. Its password
@@ -172,7 +176,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
 
   useEffect(() => {
     if (!isOpen) return;
-    setTab('general');
+    setTab(initialTab ?? 'general');
     setUnlockFor(null);
     unlockDeclined.current = false;
     refreshPorts();
@@ -234,8 +238,8 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
         setVaultKeyId(`session:${editingSession.name}`);
       }
       setVaultPassword('');
-      setIsNetworkDevice(false);
       setVaultEnablePassword('');
+      setRemoveEnable(false);
       setAutoEnable(extra.PlinkyAutoEnable === '1');
       setAutoLogin(extra.PlinkyAutoLogin === '1');
       const delay = pasteLineDelayFrom(extra);
@@ -286,8 +290,8 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
       setJumpPassword('');
       setJumpVaultKey(null);
       setVaultPassword('');
-      setIsNetworkDevice(false);
       setVaultEnablePassword('');
+      setRemoveEnable(false);
       setAutoEnable(false);
       setAutoLogin(false);
       setPasteDelay('');
@@ -297,14 +301,6 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
       setAutoReconnect(false);
     }
   }, [isOpen, editingSession, initialFolder]);
-
-  // The saved entry says whether it has an enable password; the checkbox
-  // used to start unticked on every edit, as if it had none.
-  useEffect(() => {
-    if (!isOpen || !savedVaultKey) return;
-    const meta = vaultEntries.find(v => v.id === savedVaultKey);
-    if (meta) setIsNetworkDevice(!!meta.has_enable_secret);
-  }, [isOpen, savedVaultKey, vaultEntries]);
 
   // Ticking "Save credentials", or opening a saved session's credentials,
   // with the vault locked asks for the master password there and then.
@@ -488,30 +484,34 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
         extra.PlinkyVaultKey = selectedVaultKey;
       } else if (vaultMode === 'new') {
         const finalKeyId = vaultKeyId.trim() || `session:${sessionName}`;
-        if (vaultPassword && vaultState === 'none') {
+        if ((vaultPassword || vaultEnablePassword) && vaultState === 'none') {
           setVaultSaveError(NO_VAULT_MESSAGE);
           setTab('credentials');
           return;
         }
         const exists = vaultEntries.some(v => v.id === finalKeyId);
-        if (vaultPassword || (exists && vaultEnablePassword)) {
+        if (vaultPassword || vaultEnablePassword || (exists && removeEnable)) {
           const now = Math.floor(Date.now() / 1000);
           // Left blank, a password stays what it was: replacing the login
           // password used to drop the enable password with it.
           const prev = exists ? await vaultGetEntry(finalKeyId) : null;
+          const keptEnable = removeEnable ? undefined : prev?.enable_secret;
           const entry: VaultEntry = {
             id: finalKeyId,
             username: isSerial ? undefined : (username.trim() || prev?.username || undefined),
             // Never trimmed: a password with a leading or trailing space is
             // a different password.
             secret: vaultPassword || prev?.secret || '',
-            enable_secret: isNetworkDevice ? (vaultEnablePassword || prev?.enable_secret || undefined) : undefined,
+            enable_secret: vaultEnablePassword || keptEnable || undefined,
             notes: prev?.notes || `Saved credentials for session "${sessionName}"`,
             created_at: prev?.created_at ?? now,
             updated_at: now,
           };
-          if (!entry.secret) {
-            setVaultSaveError('Enter the login password to save in the vault.');
+          // A console may ask for no login, only an enable password: an
+          // entry with just that is fine (the backend never sends an empty
+          // login password).
+          if (!entry.secret && !entry.enable_secret) {
+            setVaultSaveError('Enter the login password, the enable password or both to save in the vault.');
             setTab('credentials');
             return;
           }
@@ -533,7 +533,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
           extra.PlinkyVaultKey = finalKeyId;
         } else {
           // Linking to an entry that doesn't exist left a dangling key.
-          setVaultSaveError('Enter the password to save in the vault, or untick "Save Credentials in Encrypted Vault".');
+          setVaultSaveError('Enter the login password, the enable password or both to save in the vault, or untick "Save Credentials in Encrypted Vault".');
           setTab('credentials');
           return;
         }
@@ -583,7 +583,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
     onSave(session);
     // Open terminals of this session apply the new delay right away.
     window.dispatchEvent(new CustomEvent<SessionSavedDetail>(SESSION_SAVED_EVENT, {
-      detail: { name: session.name, pasteLineDelayMs, autoReconnect: autoReconnectOn, look: sessionLookFrom(extra) },
+      detail: { name: session.name, pasteLineDelayMs, autoReconnect: autoReconnectOn, autoEnable, look: sessionLookFrom(extra) },
     }));
     onClose();
   };
@@ -593,6 +593,11 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
   // a blank password then keeps the stored one.
   const typedKey = vaultKeyId.trim();
   const keyIsSaved = !!typedKey && (typedKey === savedVaultKey || vaultEntries.some(v => v.id === typedKey));
+  // The entry the enable password comes from, and whether it has one.
+  const enableEntryKey = useVault ? (vaultMode === 'link' ? selectedVaultKey : typedKey) : '';
+  const enableSaved = !!enableEntryKey && !!vaultEntries.find(v => v.id === enableEntryKey)?.has_enable_secret;
+  const hasEnable = !!vaultEnablePassword || (enableSaved && !removeEnable);
+  const enableEditable = !useVault || vaultMode === 'new';
 
   // The tabs this protocol has. A dot marks one holding non-default settings.
   const visibleTabs: { id: SessionTab; label: string; on?: boolean }[] = [
@@ -1007,7 +1012,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
                           <option value="" disabled>-- Select a vault credential --</option>
                           {vaultEntries.map(e => (
                             <option key={e.id} value={e.id}>
-                              {e.id} {e.username ? `(${e.username})` : ''} {e.has_enable_secret ? '[+ Enable Pwd]' : ''}
+                              {e.id} {e.username ? `(${e.username})` : ''} {e.has_enable_secret ? '· enable password' : ''}
                             </option>
                           ))}
                         </select>
@@ -1032,7 +1037,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
                           </div>
                           <div className="space-y-1">
                             <label htmlFor="new-session-modal-login-password" className="text-slate-300 text-meta">
-                              {keyIsSaved ? 'Login Password' : 'Login Password *'}
+                              {keyIsSaved || vaultEnablePassword ? 'Login Password' : 'Login Password *'}
                             </label>
                             <input id="new-session-modal-login-password"
                               type="password"
@@ -1047,36 +1052,6 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
                           </div>
                         </div>
 
-                        {/* Network Device Enable Password Toggle */}
-                        <div className="pt-0.5">
-                          <label className="flex items-center space-x-2 cursor-pointer">
-                            <input
-                              type="checkbox"
-                              checked={isNetworkDevice}
-                              onChange={e => setIsNetworkDevice(e.target.checked)}
-                              className="rounded border-plinky-700 text-sky-500 focus:ring-0 bg-plinky-900"
-                            />
-                            <span className="text-slate-300 text-xs font-medium">
-                              Network Device (requires Enable Password / Privileged Exec)
-                            </span>
-                          </label>
-                        </div>
-
-                        {isNetworkDevice && (
-                          <div className="p-2 bg-plinky-950/60 border border-plinky-700 rounded space-y-1 animate-in fade-in duration-100">
-                            <label htmlFor="new-session-modal-enable-password-cisco-arista-h" className="block text-meta text-slate-300 font-medium">
-                              Enable Password (Cisco / Arista / Huawei Privileged EXEC)
-                            </label>
-                            <input id="new-session-modal-enable-password-cisco-arista-h"
-                              type="password"
-                              autoComplete="new-password"
-                              value={vaultEnablePassword}
-                              onChange={e => setVaultEnablePassword(e.target.value)}
-                              placeholder="e.g. Cisco enable secret..."
-                              className="w-full bg-plinky-900 border border-plinky-700 rounded px-2 py-1 text-slate-100 font-mono text-xs focus:outline-none focus:border-sky-500"
-                            />
-                          </div>
-                        )}
                       </div>
                     )}
 
@@ -1114,6 +1089,84 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
                 )}
               </div>
 
+              {/* The enable password: its own block, always shown, so it is
+                  plain where it goes. It used to sit behind "Save credentials",
+                  "Create new entry" and a "Network Device" box. Stored in the
+                  session's vault entry (enable_secret) like the login password;
+                  the automatic switch is PlinkyAutoEnable in the session file. */}
+              <section aria-labelledby="new-session-modal-enable-heading" className="p-3 bg-plinky-950/70 border border-plinky-800 rounded-md space-y-2 text-meta">
+                <h3 id="new-session-modal-enable-heading" className="text-slate-200 text-xs font-medium flex items-center gap-1.5">
+                  <Shield className="w-3.5 h-3.5 text-slate-400" aria-hidden="true" />
+                  <span>Privileged mode (enable)</span>
+                </h3>
+                {enableEditable ? (
+                  <div className="space-y-1">
+                    <label htmlFor="new-session-modal-enable-password" className="block text-slate-300">Enable password</label>
+                    <div className="flex items-center gap-2">
+                      <input id="new-session-modal-enable-password"
+                        type="password"
+                        autoComplete="new-password"
+                        aria-describedby="new-session-modal-enable-help"
+                        value={vaultEnablePassword}
+                        onChange={e => {
+                          setVaultEnablePassword(e.target.value);
+                          // Saving it needs the vault: typing here is asking for that.
+                          if (e.target.value && !useVault) { setUseVault(true); setVaultMode('new'); }
+                          if (e.target.value) setRemoveEnable(false);
+                        }}
+                        placeholder={enableSaved && !removeEnable ? 'Saved. Type to replace' : 'For routers, switches and firewalls'}
+                        className="flex-1 min-w-0 bg-plinky-900 border border-plinky-700 rounded px-2 py-1 text-slate-100 font-mono text-xs placeholder-plinky-muted focus:outline-none focus:border-sky-500"
+                      />
+                      {enableSaved && !removeEnable && !vaultEnablePassword && (
+                        <button
+                          type="button"
+                          onClick={() => setRemoveEnable(true)}
+                          className="shrink-0 flex items-center gap-1 px-2 py-1 rounded border border-plinky-700 text-slate-300 hover:border-rose-500/50 hover:text-rose-300"
+                        >
+                          <Trash2 className="w-3 h-3" aria-hidden="true" />
+                          <span>Remove</span>
+                        </button>
+                      )}
+                    </div>
+                    {removeEnable && (
+                      <p role="status" className="flex items-center gap-2 text-amber-300">
+                        <span>The enable password is removed from the vault when you save.</span>
+                        <button type="button" onClick={() => setRemoveEnable(false)} className="underline hover:text-amber-200">Keep it</button>
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-slate-300">
+                    {enableSaved
+                      ? <>Comes from vault entry <span className="font-mono">{enableEntryKey}</span>.</>
+                      : <>Vault entry <span className="font-mono">{enableEntryKey || '(none picked)'}</span> has no enable password.</>}
+                    {' '}Change it in Vault, in the top bar.
+                  </p>
+                )}
+                <p id="new-session-modal-enable-help" className="text-plinky-muted">
+                  The password the device asks for after you type <code className="text-slate-300">enable</code>.
+                  It is kept in the vault with this session's login{protocol === 'SSH' && enableJumpHost ? ' and only ever sent to this device, never to the jump host' : ''}.
+                  Leave it empty for servers.
+                </p>
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input type="checkbox" checked={autoEnable} onChange={e => setAutoEnable(e.target.checked)} className="mt-0.5" aria-describedby="new-session-modal-auto-enable-help" />
+                  <span className="text-slate-300">
+                    Send it when the device asks
+                    <span id="new-session-modal-auto-enable-help" className="block text-plinky-muted">
+                      Only right after you type <code>enable</code>, <code>en</code> or <code>super</code> and the device answers <code>Password:</code>.
+                      Leave off if you connect from this device to others: they would be sent this password too.
+                    </span>
+                  </span>
+                </label>
+                {autoEnable && !hasEnable && enableEditable && (
+                  <p role="status" className="text-amber-300">No enable password saved yet, so there is nothing to send. Type it above.</p>
+                )}
+                <p className="text-plinky-muted">
+                  To send it yourself: right-click the terminal, then <span className="text-slate-300">Send Enable Password</span>, or press{' '}
+                  <kbd className="px-1 rounded border border-plinky-700 text-slate-300 font-mono">Ctrl+Shift+E</kbd>.
+                </p>
+              </section>
+
               {/* Automatic answers from the vault. SSH needs no switch: plink
                   logs in by itself. The others answer prompts the device prints,
                   so they're opt-in per session. */}
@@ -1134,15 +1187,6 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
                     </span>
                   </label>
                 )}
-                <label className="flex items-start space-x-2 cursor-pointer">
-                  <input type="checkbox" checked={autoEnable} onChange={e => setAutoEnable(e.target.checked)} className="mt-0.5" />
-                  <span className="text-slate-300">
-                    Send enable password automatically
-                    <span className="block text-plinky-muted">
-                      After you type enable / en / super and the device asks for a password. Leave off if you hop from this device to others: they would get this device's enable password.
-                    </span>
-                  </span>
-                </label>
               </div>
 
             </div>

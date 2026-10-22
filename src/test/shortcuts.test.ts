@@ -24,6 +24,12 @@ describe('terminal shortcuts', () => {
     expect(terminalShortcut(key('KeyA', { ctrl: true, shift: true }))).toBe('selectAll');
   });
 
+  it('sends the enable password with Ctrl+Shift+E, and leaves Ctrl+E (end of line) to the device', () => {
+    expect(terminalShortcut(key('KeyE', { ctrl: true, shift: true }))).toBe('sendEnable');
+    expect(terminalShortcut(key('KeyE', { ctrl: true }))).toBeNull();
+    expect(SHORTCUT_LIST.some(s => s.keys.includes('Ctrl+Shift+E'))).toBe(true);
+  });
+
   it('leaves Ctrl+C and Ctrl+V to the device, as PuTTY does', () => {
     // Ctrl+C stops a command on a router; taking it for copy would lose that.
     expect(terminalShortcut(key('KeyC', { ctrl: true }))).toBeNull();

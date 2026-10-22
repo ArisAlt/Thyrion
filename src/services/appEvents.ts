@@ -15,6 +15,8 @@ export interface SessionSavedDetail {
   pasteLineDelayMs: number;
   /** Reconnect by itself when the connection drops. */
   autoReconnect: boolean;
+  /** Send the enable password when the device asks (PlinkyAutoEnable). */
+  autoEnable?: boolean;
   /** The session's own colour scheme and font, over Settings' defaults. */
   look?: SessionLook;
 }

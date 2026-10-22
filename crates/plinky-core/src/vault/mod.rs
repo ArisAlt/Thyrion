@@ -117,7 +117,7 @@ impl From<&VaultEntry> for VaultEntryMeta {
         Self {
             id: e.id.clone(),
             username: e.username.clone(),
-            has_enable_secret: e.enable_secret.as_ref().map(|s| !s.is_empty()).unwrap_or(false),
+            has_enable_secret: e.has_enable(),
             notes: e.notes.clone(),
             created_at: e.created_at,
             updated_at: e.updated_at,
@@ -155,6 +155,18 @@ impl VaultEntry {
     pub fn with_notes(mut self, notes: impl Into<String>) -> Self {
         self.notes = Some(notes.into());
         self
+    }
+
+    /// Whether the entry has a login password. A console that asks only
+    /// for an enable password is saved with an empty one, which must never
+    /// be sent as a login password.
+    pub fn has_login(&self) -> bool {
+        !self.secret.is_empty()
+    }
+
+    /// Whether the entry has an enable password.
+    pub fn has_enable(&self) -> bool {
+        self.enable_secret.as_ref().is_some_and(|s| !s.is_empty())
     }
 }
 
@@ -594,6 +606,21 @@ mod tests {
         let json = serde_json::to_string(&switch_meta).unwrap();
         assert!(!json.contains("privileged-enable-secret"));
         assert!(!json.contains("switch-login"));
+    }
+
+    #[test]
+    fn an_entry_may_hold_only_an_enable_password() {
+        // A console with no login: the login password is empty, and an
+        // empty one counts as none.
+        let console = VaultEntry::new("session:R9", "").with_enable_secret("en4ble");
+        assert!(!console.has_login());
+        assert!(console.has_enable());
+        assert!(VaultEntryMeta::from(&console).has_enable_secret);
+
+        let server = VaultEntry::new("session:web", "pw");
+        assert!(server.has_login());
+        assert!(!server.has_enable());
+        assert!(!VaultEntry::new("x", "pw").with_enable_secret("").has_enable());
     }
 
     #[test]

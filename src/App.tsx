@@ -21,7 +21,7 @@ import { appShortcut, AppShortcut } from './services/shortcuts';
 import { TooltipHost } from './components/common/TooltipHost';
 import { SyncBroadcastBar } from './components/sync/SyncBroadcastBar';
 import { QuickSnippetBar } from './components/snippets/QuickSnippetBar';
-import { NewSessionModal } from './components/modals/NewSessionModal';
+import { NewSessionModal, SessionTab } from './components/modals/NewSessionModal';
 import { TabLauncher } from './components/layout/TabLauncher';
 import { TabTitle } from './components/layout/TabTitle';
 import { getRecentSessions, recordRecentSession } from './services/recentSessions';
@@ -98,6 +98,8 @@ export const App: React.FC = () => {
   // light up are hidden, so the tabs light up too (T-012).
   const broadcastLit = useBroadcastGlow();
   const [editingSession, setEditingSession] = useState<PuttySession | null>(null);
+  // The tab the session editor opens on (a terminal's "Add one…" asks for Credentials).
+  const [editingTab, setEditingTab] = useState<SessionTab | undefined>(undefined);
   // The folder a new session starts in, when created from a folder's menu.
   const [newSessionFolder, setNewSessionFolder] = useState<string | undefined>(undefined);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -533,8 +535,9 @@ export const App: React.FC = () => {
     await loadSessions();
   };
 
-  const handleEditSession = (session: PuttySession) => {
+  const handleEditSession = (session: PuttySession, section?: SessionTab) => {
     setEditingSession(session);
+    setEditingTab(section);
     setIsNewSessionOpen(true);
   };
 
@@ -542,7 +545,7 @@ export const App: React.FC = () => {
   // is saved (a GNS3 console or local shell has none to change).
   const sessionSettingsFor = (tab: TerminalTab) => {
     const saved = sessions.find(x => x.name === tab.sessionName);
-    return saved ? () => handleEditSession(saved) : undefined;
+    return saved ? (section?: SessionTab) => handleEditSession(saved, section) : undefined;
   };
 
   // Tabs dragged into a new order. The split and grid panes take tabs in
@@ -1205,9 +1208,11 @@ export const App: React.FC = () => {
         editingSession={editingSession}
         savedSessions={sessions}
         initialFolder={newSessionFolder}
+        initialTab={editingTab}
         onClose={() => {
           setIsNewSessionOpen(false);
           setEditingSession(null);
+          setEditingTab(undefined);
           setNewSessionFolder(undefined);
         }}
         onSave={handleSaveSession}

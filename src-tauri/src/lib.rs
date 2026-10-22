@@ -496,6 +496,7 @@ async fn spawn_terminal_session(
             guard
                 .as_ref()
                 .and_then(|v| find_session_entry(v, &session_name, hostname.as_deref(), username.as_deref()))
+                .filter(|e| e.has_login())
                 .map(|e| plinky_core::transport::plink::PlinkLogin {
                     password: e.secret.clone(),
                     username: if has_username { None } else { e.username.clone() },
@@ -937,7 +938,7 @@ fn jump_credentials_for(
         return None;
     }
     let (host, port, user, entry) = jump_host_of(Some(vault), saved, &read)?;
-    let jump = entry.filter(|_| !user.is_empty()).map(|e| Login {
+    let jump = entry.filter(|e| !user.is_empty() && e.has_login()).map(|e| Login {
         user,
         host,
         port,
@@ -945,7 +946,7 @@ fn jump_credentials_for(
     });
 
     let target = find_session_entry_for(vault, Some(saved), &saved.name, None, None)
-        .filter(|_| !saved.user_name.is_empty())
+        .filter(|e| !saved.user_name.is_empty() && e.has_login())
         .map(|e| Login {
             user: saved.user_name.clone(),
             host: saved.host_name.clone(),
@@ -1018,10 +1019,12 @@ fn cli_jump_plan(
         .filter(|c| !c.trim().is_empty())
         .unwrap_or(DEFAULT_HOP_COMMAND);
     let command = hop_command(template, &saved.user_name, &saved.host_name, saved.port_number);
-    let target_entry = vault.and_then(|v| find_session_entry_for(v, Some(saved), &saved.name, None, None));
+    let target_entry = vault
+        .and_then(|v| find_session_entry_for(v, Some(saved), &saved.name, None, None))
+        .filter(|e| e.has_login());
 
     let mut steps = Vec::new();
-    if let Some(e) = entry {
+    if let Some(e) = entry.filter(|e| e.has_login()) {
         steps.push(Step { expect: password_prompt(), reply: Reply::Secret(e.secret.clone()), label: "jump password" });
     }
     steps.push(Step { expect: cli_prompt(), reply: Reply::Line(command), label: "hop command" });
@@ -1039,6 +1042,9 @@ struct VaultLookup {
     locked: bool,
     key: Option<String>,
     has_enable_secret: bool,
+    /// Whether it has a login password: an entry may hold only an enable
+    /// password, for a console that asks for no login.
+    has_login_secret: bool,
     /// The entry's username (not a secret), for Telnet/serial login prompts.
     username: Option<String>,
     /// Session opt-ins, from the session file.
@@ -1062,16 +1068,15 @@ async fn vault_lookup(
     let guard = vault_state.inner.lock().await;
     let Some(vault) = guard.as_ref() else {
         return Ok(VaultLookup {
-            locked: true, key: None, has_enable_secret: false, username: None, auto_login, auto_enable,
+            locked: true, key: None, has_enable_secret: false, has_login_secret: false, username: None, auto_login, auto_enable,
         });
     };
     let entry = find_session_entry(vault, &session_name, hostname.as_deref(), username.as_deref());
     Ok(VaultLookup {
         locked: false,
         key: entry.map(|e| e.id.clone()),
-        has_enable_secret: entry
-            .and_then(|e| e.enable_secret.as_ref())
-            .is_some_and(|s| !s.expose_secret().is_empty()),
+        has_enable_secret: entry.is_some_and(|e| e.has_enable()),
+        has_login_secret: entry.is_some_and(|e| e.has_login()),
         username: entry.and_then(|e| e.username.clone()),
         auto_login,
         auto_enable,
@@ -1099,6 +1104,7 @@ async fn sftp_target(
     } else {
         guard.as_ref().and_then(|v| {
             find_session_entry(v, session_name, hostname.as_deref(), username.as_deref())
+                .filter(|e| e.has_login())
                 .map(|e| e.secret.expose_secret().to_string())
         })
     };
@@ -1450,10 +1456,12 @@ async fn vault_send_secret(
     let vault = guard.as_ref().ok_or_else(|| "The vault is locked".to_string())?;
     let entry = vault.get_entry(&key).ok_or_else(|| format!("No vault entry '{key}'"))?;
     let secret = match field.as_str() {
-        "login" => &entry.secret,
+        "login" if entry.has_login() => &entry.secret,
+        "login" => return Err(format!("Vault entry '{key}' has no login password")),
         "enable" => entry
             .enable_secret
             .as_ref()
+            .filter(|_| entry.has_enable())
             .ok_or_else(|| format!("Vault entry '{key}' has no enable password"))?,
         other => return Err(format!("Unknown vault field '{other}'")),
     };
@@ -2172,6 +2180,12 @@ mod tests {
         let c = jump_credentials_for(&vault, &no_user, none).unwrap();
         assert!(c.jump.is_none() && c.target.is_some());
 
+        // An entry with only an enable password gives no login: the target
+        // device's prompt is left to the user, not answered with "".
+        vault.set_entry(VaultEntry::new("session:Router", "").with_enable_secret("en4ble"));
+        let c = jump_credentials_for(&vault, &router, none).unwrap();
+        assert!(c.jump.is_some() && c.target.is_none());
+
         // Not a jump session (or another proxy type): the -pwfile path applies.
         assert!(jump_credentials_for(&vault, &session("Router", "h", "u", &[]), none).is_none());
         assert!(jump_credentials_for(&vault, &session("Router", "h", "u", &[("ProxyMethod", "5"), ("ProxyHost", "x")]), none).is_none());
@@ -2212,6 +2226,14 @@ mod tests {
         assert_eq!(sent(script.feed(b"| Password: ")).as_deref(), Some("nxos-pw\r"));
         assert_eq!(sent(script.feed(b"\r\nnexus-01# ")).as_deref(), Some("ssh -l admin 10.1.1.2\r"));
         assert_eq!(sent(script.feed(b"Password: ")).as_deref(), Some("ios-pw\r"));
+
+        // Only an enable password for PE2: the hop's password prompt is
+        // the user's, and the enable password is never sent as a login.
+        vault.set_entry(VaultEntry::new("session:PE2", "").with_enable_secret("pe2-enable"));
+        let (_, mut script) = cli_jump_plan(Some(&vault), &pe2, none).unwrap();
+        assert_eq!(sent(script.feed(b"| Password: ")).as_deref(), Some("nxos-pw\r"));
+        assert_eq!(sent(script.feed(b"\r\nnexus-01# ")).as_deref(), Some("ssh -l admin 10.1.1.2\r"));
+        assert_eq!(sent(script.feed(b"Password: ")), None);
 
         // Locked vault: it still hops, the passwords are the user's.
         let (_, mut script) = cli_jump_plan(None, &session(&[("PlinkyJumpMode", "cli"), ("ProxyHost", "10.0.0.1")]), none).unwrap();
