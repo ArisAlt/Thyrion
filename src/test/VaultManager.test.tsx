@@ -135,15 +135,19 @@ describe('editing a vault entry', () => {
   it('replaces a password that is typed in', async () => {
     await openEdit();
     fireEvent.change(screen.getByLabelText('Secret'), { target: { value: 'new-pass' } });
-    fireEvent.change(screen.getByLabelText('Enable Password'), { target: { value: 'new-enable' } });
+    fireEvent.change(screen.getByLabelText(/^Enable password/), { target: { value: 'new-enable' } });
     fireEvent.click(screen.getByText('Save Changes'));
     await waitFor(() => expect(vaultSetEntry).toHaveBeenCalledTimes(1));
     expect(saved()).toMatchObject({ secret: 'new-pass', enable_secret: 'new-enable' });
   });
 
-  it('removes the enable password when Network Device is unticked', async () => {
+  it('removes the enable password with Remove, and Keep it undoes that', async () => {
     await openEdit();
-    fireEvent.click(screen.getByLabelText(/Network Device/));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Keep it' }));
+    expect(screen.queryByText(/removed when you save/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    expect(screen.getByText(/removed when you save/)).toBeTruthy();
     fireEvent.click(screen.getByText('Save Changes'));
     await waitFor(() => expect(vaultSetEntry).toHaveBeenCalledTimes(1));
     expect(saved().enable_secret).toBeUndefined();
@@ -151,3 +155,18 @@ describe('editing a vault entry', () => {
   });
 });
 
+describe('adding a vault entry', () => {
+  it('shows the enable password field without a box to tick, and takes an entry with only that', async () => {
+    vi.mocked(vaultIsUnlocked).mockResolvedValue(true);
+    vi.mocked(vaultListEntriesMeta).mockResolvedValue([]);
+    vi.mocked(vaultSetEntry).mockReset().mockResolvedValue(true);
+    render(<VaultManager />);
+    fireEvent.click(await screen.findByRole('button', { name: /Add/ }));
+    fireEvent.change(screen.getByLabelText('Key / Session Identifier'), { target: { value: 'session:R9' } });
+    fireEvent.change(screen.getByLabelText(/^Enable password/), { target: { value: ' en4ble ' } });
+    fireEvent.submit(screen.getByLabelText(/^Enable password/).closest('form')!);
+    await waitFor(() => expect(vaultSetEntry).toHaveBeenCalledTimes(1));
+    // Kept exactly as typed, spaces included.
+    expect(vi.mocked(vaultSetEntry).mock.calls[0][0]).toMatchObject({ id: 'session:R9', secret: '', enable_secret: ' en4ble ' });
+  });
+});

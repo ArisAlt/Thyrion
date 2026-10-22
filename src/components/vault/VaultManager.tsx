@@ -67,7 +67,9 @@ export const VaultManager: React.FC<VaultManagerProps> = ({ onClose }) => {
   const [newId, setNewId] = useState('');
   const [newUsername, setNewUsername] = useState('');
   const [newSecret, setNewSecret] = useState('');
-  const [isNetworkDevice, setIsNetworkDevice] = useState(false);
+  // Editing an entry that has an enable password, and "Remove" pressed on it.
+  const [editingHasEnable, setEditingHasEnable] = useState(false);
+  const [removeEnable, setRemoveEnable] = useState(false);
   const [newEnableSecret, setNewEnableSecret] = useState('');
   const [newNotes, setNewNotes] = useState('');
   // Set while the form edits an existing entry instead of adding one.
@@ -220,7 +222,8 @@ export const VaultManager: React.FC<VaultManagerProps> = ({ onClose }) => {
     setNewId('');
     setNewUsername('');
     setNewSecret('');
-    setIsNetworkDevice(false);
+    setEditingHasEnable(false);
+    setRemoveEnable(false);
     setNewEnableSecret('');
     setNewNotes('');
   };
@@ -232,7 +235,8 @@ export const VaultManager: React.FC<VaultManagerProps> = ({ onClose }) => {
     setNewId(entry.id);
     setNewUsername(entry.username || '');
     setNewSecret('');
-    setIsNetworkDevice(!!entry.has_enable_secret);
+    setEditingHasEnable(!!entry.has_enable_secret);
+    setRemoveEnable(false);
     setNewEnableSecret('');
     setNewNotes(entry.notes || '');
     setError(null);
@@ -260,24 +264,24 @@ export const VaultManager: React.FC<VaultManagerProps> = ({ onClose }) => {
         id: editingId,
         username: newUsername.trim() || undefined,
         secret: newSecret || current.secret,
-        // Unticking "Network Device" removes the enable password.
-        enable_secret: isNetworkDevice
-          ? (newEnableSecret.trim() || current.enable_secret || undefined)
-          : undefined,
+        // Left empty it stays; "Remove" drops it. Never trimmed: a space
+        // is part of a password.
+        enable_secret: newEnableSecret || (removeEnable ? undefined : current.enable_secret) || undefined,
         notes: newNotes.trim() || undefined,
         created_at: current.created_at,
         updated_at: now,
       };
     } else {
-      if (!newId.trim() || !newSecret) {
-        setError("Key name and secret are required");
+      // An entry may hold only an enable password: a console with no login.
+      if (!newId.trim() || (!newSecret && !newEnableSecret)) {
+        setError('Enter a key name, and a password, an enable password or both');
         return;
       }
       entry = {
         id: newId.trim(),
         username: newUsername.trim() || undefined,
         secret: newSecret,
-        enable_secret: isNetworkDevice && newEnableSecret.trim() ? newEnableSecret.trim() : undefined,
+        enable_secret: newEnableSecret || undefined,
         notes: newNotes.trim() || undefined,
         created_at: now,
         updated_at: now,
@@ -655,38 +659,40 @@ export const VaultManager: React.FC<VaultManagerProps> = ({ onClose }) => {
                   />
                 </div>
 
-                <div className="pt-1">
-                  <label className="flex items-center space-x-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={isNetworkDevice}
-                      onChange={e => setIsNetworkDevice(e.target.checked)}
-                      className="rounded border-plinky-700 text-sky-500 focus:ring-0 bg-plinky-950"
-                    />
-                    <span className="text-slate-300 text-xs font-medium">
-                      Network Device (Enable Password / Privileged Exec)
-                    </span>
+                <div className="space-y-1">
+                  <label htmlFor="vault-manager-enable-password" className="block text-meta text-slate-400">
+                    Enable password <span className="text-plinky-muted">(optional)</span>
                   </label>
-                </div>
-
-                {isNetworkDevice && (
-                  <div className="p-2.5 bg-plinky-950/60 border border-plinky-700 rounded space-y-1 animate-in fade-in duration-100">
-                    <label className="block text-meta text-slate-300 font-medium">
-                      Enable Password (Privileged Secret)
-                    </label>
-                    <input
+                  <div className="flex items-center gap-2">
+                    <input id="vault-manager-enable-password"
                       type="password"
+                      autoComplete="new-password"
                       value={newEnableSecret}
-                      onChange={e => setNewEnableSecret(e.target.value)}
-                      aria-label="Enable Password"
-                      placeholder={editingId ? 'Leave empty to keep the current enable password' : 'e.g. Cisco enable secret...'}
-                      className="w-full px-2.5 py-1.5 bg-plinky-950 border border-plinky-700 rounded text-xs text-white focus:outline-none focus:border-sky-500 font-mono"
+                      onChange={e => { setNewEnableSecret(e.target.value); if (e.target.value) setRemoveEnable(false); }}
+                      aria-describedby="vault-manager-enable-help"
+                      placeholder={editingHasEnable && !removeEnable ? 'Leave empty to keep the current enable password' : 'For routers, switches and firewalls'}
+                      className="flex-1 min-w-0 px-2.5 py-1.5 bg-plinky-950 border border-plinky-700 rounded text-xs text-white focus:outline-none focus:border-sky-500 font-mono"
                     />
-                    <p className="text-meta text-slate-400">
-                      Used for privileged exec elevation (e.g. Cisco `enable` command) on network switches and routers.
-                    </p>
+                    {editingHasEnable && !removeEnable && !newEnableSecret && (
+                      <button
+                        type="button"
+                        onClick={() => setRemoveEnable(true)}
+                        className="shrink-0 px-2 py-1.5 rounded border border-plinky-700 text-xs text-slate-300 hover:border-rose-500/50 hover:text-rose-300"
+                      >
+                        Remove
+                      </button>
+                    )}
                   </div>
-                )}
+                  {removeEnable && (
+                    <p role="status" className="text-meta text-amber-300">
+                      The enable password is removed when you save.{' '}
+                      <button type="button" onClick={() => setRemoveEnable(false)} className="underline hover:text-amber-200">Keep it</button>
+                    </p>
+                  )}
+                  <p id="vault-manager-enable-help" className="text-meta text-slate-400">
+                    What a network device asks for after <code>enable</code>. Sessions using this entry can send it.
+                  </p>
+                </div>
 
                 <div>
                   <label htmlFor="vault-manager-notes-optional" className="block text-meta text-slate-400 mb-1">Notes (Optional)</label>

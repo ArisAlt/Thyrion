@@ -73,11 +73,31 @@ refused or a step fails, so it never retries a stored password.
 
 ### Enable passwords
 
-With "send the enable password" on for a session, Thyrion types it only when
-**you** have just typed `enable` (or `en`, `super`) yourself, within the last
-5 seconds, and the device answers `Password:`. What you typed is read from
-your keystrokes, not from what the device prints, so a device cannot fake
-it. An enable prompt is never answered with the login password.
+A network device's enable password (the one it asks for after you type
+`enable`) is kept in the session's vault entry, next to its login password.
+Set it in **Session Settings → Credentials & Vault → Privileged mode
+(enable)**, or in the Vault screen. An entry may hold only an enable
+password, for a console that asks for no login; Thyrion then never sends an
+empty login password.
+
+- **Sent by itself** only with "Send it when the device asks" on for the
+  session, and only when **you** have just typed `enable` (or `en`, `super`)
+  yourself, within the last 5 seconds, and the device answers `Password:`.
+  What you typed is read from your keystrokes, not from what the device
+  prints, so a device cannot fake it. An enable prompt is never answered with
+  the login password.
+- **Sent when you ask**: right-click the terminal → **Send Enable Password**,
+  or press **Ctrl+Shift+E**. With no password prompt showing, Thyrion asks
+  first, since a device that echoes would show it. With none saved, it says
+  so and offers to open the session's settings; with the vault locked, it
+  asks for the master password, then sends it.
+- **Jump hosts**: the enable password belongs to the device the session
+  connects to. The jump host's own entry is used only to log in to it, and
+  is never sent as an enable password.
+
+Leave "Send it when the device asks" off for a device you use to reach other
+devices (for example `telnet` or `ssh` from its command line): their enable
+prompts would look the same, and would be sent this device's password.
 
 ### Automatic console login (Telnet and serial)
 

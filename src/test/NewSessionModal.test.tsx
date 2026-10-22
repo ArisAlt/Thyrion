@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import { NewSessionModal } from '../components/modals/NewSessionModal';
@@ -321,13 +321,8 @@ describe('NewSessionModal Component', () => {
     const pwdInput = screen.getByPlaceholderText(/Session login password\.\.\./i);
     fireEvent.change(pwdInput, { target: { value: 'adminSecret123' } });
 
-    // Enable Network Device checkbox
-    const netDevCheckbox = screen.getByLabelText(/Network Device \(requires Enable Password \/ Privileged Exec\)/i);
-    fireEvent.click(netDevCheckbox);
-
-    // Fill in Enable Password
-    const enablePwdInput = screen.getByPlaceholderText(/e\.g\. Cisco enable secret\.\.\./i);
-    fireEvent.change(enablePwdInput, { target: { value: 'ciscoPrivilegedSecret456' } });
+    // The enable password has its own labelled field, no box to tick first.
+    fireEvent.change(screen.getByLabelText(/^Enable password$/), { target: { value: 'ciscoPrivilegedSecret456' } });
 
     // Submit
     fireEvent.click(screen.getByRole('button', { name: /^save session$/i }));
@@ -365,8 +360,7 @@ describe('NewSessionModal Component', () => {
       fireEvent.change(screen.getByPlaceholderText(/Session login password\.\.\./i), { target: { value: password } });
     }
     if (enable !== undefined) {
-      fireEvent.click(screen.getByLabelText(/Network Device \(requires Enable Password \/ Privileged Exec\)/i));
-      fireEvent.change(screen.getByPlaceholderText(/e\.g\. Cisco enable secret\.\.\./i), { target: { value: enable } });
+      fireEvent.change(screen.getByLabelText(/^Enable password$/), { target: { value: enable } });
     }
     fireEvent.click(screen.getByRole('button', { name: /^save session$/i }));
   };
@@ -388,7 +382,7 @@ describe('NewSessionModal Component', () => {
     const onSave = vi.fn();
     render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} />);
     fillVaultSession('');
-    expect(await screen.findByText(/Enter the password to save in the vault/)).toBeDefined();
+    expect(await screen.findByText(/Enter the login password, the enable password or both/)).toBeDefined();
     expect(onSave).not.toHaveBeenCalled();
   });
 
@@ -461,7 +455,7 @@ describe('NewSessionModal Component', () => {
     fireEvent.change(screen.getByLabelText(/^Session name$/i), { target: { value: 'SW1' } });
     fireEvent.change(screen.getByPlaceholderText(/192\.0\.2\.10/i), { target: { value: '10.0.0.2' } });
     expect(screen.queryByLabelText(/Log in automatically/i)).toBeNull(); // SSH logs in by itself
-    fireEvent.click(screen.getByLabelText(/Send enable password automatically/i));
+    fireEvent.click(screen.getByLabelText(/Send it when the device asks/i));
     fireEvent.click(screen.getByRole('button', { name: /^save session$/i }));
     await waitFor(() => expect(onSave).toHaveBeenCalled());
     expect(onSave.mock.calls[0][0].extra.PlinkyAutoEnable).toBe('1');
@@ -564,7 +558,7 @@ describe('NewSessionModal Component', () => {
     await waitFor(() => expect(onSave).toHaveBeenCalled());
     window.removeEventListener('plinky:session-saved', listener);
     expect(onSave.mock.calls[0][0].extra.PlinkyPasteLineDelayMs).toBe('250');
-    expect(heard).toEqual([{ name: 'Console-SW', pasteLineDelayMs: 250, autoReconnect: false, look: {} }]);
+    expect(heard).toEqual([{ name: 'Console-SW', pasteLineDelayMs: 250, autoReconnect: false, autoEnable: false, look: {} }]);
   });
 
   it('removes the paste line delay when set back to 0', async () => {
@@ -821,8 +815,8 @@ describe('saving a password when there is no vault yet', () => {
     fireEvent.click(screen.getByRole('tab', { name: /Credentials & Vault/i }));
     expect((screen.getByLabelText(/Vault Key ID/) as HTMLInputElement).value).toBe('router-cisco-core');
     expect((screen.getByLabelText(/Login Password/) as HTMLInputElement).placeholder).toMatch(/Saved/);
-    // The entry has an enable password; the box used to start unticked.
-    await waitFor(() => expect((screen.getByLabelText(/Network Device/) as HTMLInputElement).checked).toBe(true));
+    // The entry has an enable password: the field says it is saved.
+    await waitFor(() => expect((screen.getByLabelText(/^Enable password$/) as HTMLInputElement).placeholder).toMatch(/Saved/));
     fireEvent.click(screen.getByRole('button', { name: /^save changes$/i }));
     await waitFor(() => expect(onSave).toHaveBeenCalled());
     expect(mockVaultSetEntry).not.toHaveBeenCalled();
@@ -835,11 +829,25 @@ describe('saving a password when there is no vault yet', () => {
     mockVaultGetEntry.mockResolvedValue({ id: 'router-cisco-core', username: 'netops', secret: 'old', enable_secret: 'en4ble', created_at: 5, updated_at: 5 });
     render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={vi.fn()} editingSession={savedWithVault} />);
     fireEvent.click(screen.getByRole('tab', { name: /Credentials & Vault/i }));
-    await waitFor(() => expect((screen.getByLabelText(/Network Device/) as HTMLInputElement).checked).toBe(true));
+    await waitFor(() => expect((screen.getByLabelText(/^Enable password$/) as HTMLInputElement).placeholder).toMatch(/Saved/));
     fireEvent.change(screen.getByLabelText(/Login Password/), { target: { value: 'n3w' } });
     fireEvent.click(screen.getByRole('button', { name: /^save changes$/i }));
     await waitFor(() => expect(mockVaultSetEntry).toHaveBeenCalled());
     expect(mockVaultSetEntry.mock.calls[0][0]).toMatchObject({ secret: 'n3w', enable_secret: 'en4ble', created_at: 5 });
+    mockVaultGetEntry.mockResolvedValue(null);
+  });
+
+  it('Remove drops a saved enable password and keeps the login password', async () => {
+    mockVaultIsUnlocked.mockResolvedValue(true);
+    mockVaultSetEntry.mockClear();
+    mockVaultGetEntry.mockResolvedValue({ id: 'router-cisco-core', username: 'netops', secret: 'old', enable_secret: 'en4ble', created_at: 5, updated_at: 5 });
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={vi.fn()} editingSession={savedWithVault} />);
+    fireEvent.click(screen.getByRole('tab', { name: /Credentials & Vault/i }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove' }));
+    expect(screen.getByRole('status').textContent).toMatch(/removed from the vault when you save/);
+    fireEvent.click(screen.getByRole('button', { name: /^save changes$/i }));
+    await waitFor(() => expect(mockVaultSetEntry).toHaveBeenCalled());
+    expect(mockVaultSetEntry.mock.calls[0][0]).toMatchObject({ secret: 'old', enable_secret: undefined });
     mockVaultGetEntry.mockResolvedValue(null);
   });
 
@@ -952,3 +960,80 @@ describe('saving a password when there is no vault yet', () => {
   });
 });
 
+describe('the enable password has its own place in the session settings', () => {
+  const savedWithVault = {
+    name: 'core-rtr1', hostname: '192.0.2.1', port: 22, protocol: 'SSH', username: 'netops',
+    extra: { PlinkyVaultKey: 'router-cisco-core' },
+  } as any;
+  beforeEach(() => {
+    mockVaultIsInitialized.mockResolvedValue(true);
+    mockVaultIsUnlocked.mockResolvedValue(true);
+    mockVaultSetEntry.mockClear();
+  });
+
+  const newDevice = () => {
+    fireEvent.change(screen.getByLabelText(/^Session name$/i), { target: { value: 'Core-SW' } });
+    fireEvent.change(screen.getByPlaceholderText(/192\.0\.2\.10/i), { target: { value: '192.0.2.2' } });
+    fireEvent.click(screen.getByRole('tab', { name: /Credentials & Vault/i }));
+  };
+
+  it('is a labelled field on Credentials, with nothing to tick first, and says when it is sent', () => {
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={vi.fn()} />);
+    newDevice();
+    const field = screen.getByLabelText(/^Enable password$/) as HTMLInputElement;
+    expect(field.type).toBe('password');
+    const help = document.getElementById(field.getAttribute('aria-describedby')!)!;
+    expect(help.textContent).toMatch(/asks for after you type enable/);
+    expect(screen.getByRole('region', { name: /Privileged mode/ })).toBeDefined();
+    expect(screen.getByText('Ctrl+Shift+E')).toBeDefined();
+  });
+
+  it('typing it turns on saving to the vault', () => {
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={vi.fn()} />);
+    newDevice();
+    const save = screen.getByLabelText(/Save credentials in Encrypted Vault/i) as HTMLInputElement;
+    expect(save.checked).toBe(false);
+    fireEvent.change(screen.getByLabelText(/^Enable password$/), { target: { value: 'en4ble' } });
+    expect(save.checked).toBe(true);
+  });
+
+  it('saves an entry with only an enable password, for a console with no login', async () => {
+    const onSave = vi.fn();
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} />);
+    newDevice();
+    fireEvent.change(screen.getByLabelText(/^Enable password$/), { target: { value: 'en4ble' } });
+    fireEvent.click(screen.getByRole('button', { name: /^save session$/i }));
+    await waitFor(() => expect(mockVaultSetEntry).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'session:Core-SW', secret: '', enable_secret: 'en4ble' })
+    ));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave.mock.calls[0][0].extra.PlinkyVaultKey).toBe('session:Core-SW');
+  });
+
+  it('warns when sending it automatically is on but none is saved', () => {
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={vi.fn()} />);
+    newDevice();
+    expect(screen.queryByText(/nothing to send/)).toBeNull();
+    fireEvent.click(screen.getByLabelText(/Send it when the device asks/i));
+    expect(screen.getByText(/No enable password saved yet, so there is nothing to send/)).toBeDefined();
+    fireEvent.change(screen.getByLabelText(/^Enable password$/), { target: { value: 'en4ble' } });
+    expect(screen.queryByText(/nothing to send/)).toBeNull();
+  });
+
+  it('says where a linked entry\'s enable password comes from', async () => {
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={vi.fn()} />);
+    newDevice();
+    fireEvent.click(screen.getByLabelText(/Save credentials in Encrypted Vault/i));
+    fireEvent.click(screen.getByRole('button', { name: /Link to Existing/i }));
+    await waitFor(() => expect(screen.getByText(/router-cisco-core/)).toBeDefined());
+    fireEvent.change(screen.getByDisplayValue(/-- Select a vault credential --/i), { target: { value: 'router-cisco-core' } });
+    expect(screen.queryByLabelText(/^Enable password$/)).toBeNull();
+    expect(screen.getByRole('region', { name: /Privileged mode/ }).textContent).toMatch(/Comes from vault entry router-cisco-core/);
+  });
+
+  it('opens on Credentials when asked to', () => {
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={vi.fn()} editingSession={savedWithVault} initialTab="credentials" />);
+    expect(screen.getByRole('tab', { name: /Credentials & Vault/i }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByLabelText(/^Enable password$/)).toBeDefined();
+  });
+});

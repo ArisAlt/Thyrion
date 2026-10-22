@@ -8,7 +8,7 @@
 
 type KeyInfo = Pick<KeyboardEvent, 'code' | 'ctrlKey' | 'shiftKey' | 'altKey' | 'metaKey'>;
 
-export type TerminalShortcut = 'copy' | 'paste' | 'selectAll';
+export type TerminalShortcut = 'copy' | 'paste' | 'selectAll' | 'sendEnable';
 
 export function terminalShortcut(e: KeyInfo): TerminalShortcut | null {
   if (e.altKey || e.metaKey) return null;
@@ -16,6 +16,8 @@ export function terminalShortcut(e: KeyInfo): TerminalShortcut | null {
     if (e.code === 'KeyC') return 'copy';
     if (e.code === 'KeyV') return 'paste';
     if (e.code === 'KeyA') return 'selectAll';
+    // Types the session's enable password from the vault (E for enable).
+    if (e.code === 'KeyE') return 'sendEnable';
     return null;
   }
   if (e.code === 'Insert') {
@@ -73,6 +75,7 @@ export const SHORTCUT_LIST: { keys: string[]; action: string }[] = [
   { keys: ['Ctrl+Shift+C', 'Ctrl+Insert'], action: 'Copy the selection' },
   { keys: ['Ctrl+Shift+V', 'Shift+Insert'], action: 'Paste' },
   { keys: ['Ctrl+Shift+A'], action: 'Select all' },
+  { keys: ['Ctrl+Shift+E'], action: 'Send the session\'s enable password' },
   { keys: ['Ctrl+F'], action: 'Find in the terminal' },
   { keys: ['Shift+PgUp', 'Shift+PgDn'], action: 'Scroll back and forward' },
   { keys: ['Ctrl+↑', 'Ctrl+↓'], action: 'Jump to the previous or next command' },

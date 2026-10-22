@@ -110,9 +110,9 @@ interface TerminalViewProps {
   onCwdChange?: (cwd: string) => void;
   onDuplicateTab?: (tab: TerminalTab) => void;
   onOpenSettings?: () => void;
-  /** Opens this tab's saved session's settings; absent for a tab with no
-   *  saved session (a GNS3 console, a local shell). */
-  onEditSessionSettings?: () => void;
+  /** Opens this tab's saved session's settings, on Credentials when asked;
+   *  absent for a tab with no saved session (a GNS3 console, a local shell). */
+  onEditSessionSettings?: (section?: 'credentials') => void;
   fontFamily?: string;
   fontSize?: number;
   cursorStyle?: 'block' | 'bar' | 'underline';
@@ -292,6 +292,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   // Unlocked in place: the notice then offers the saved password for the
   // prompt still waiting. It used to say "Vault in the top bar".
   const [unlockOpen, setUnlockOpen] = useState(false);
+  // Unlocking to send the enable password sends it once unlocked.
+  const unlockThenEnableRef = useRef(false);
+  // Asked for the enable password with none saved: says so, and where to add one.
+  const [enableNotice, setEnableNotice] = useState<null | 'none' | 'noVault'>(null);
+  // Typing `enable` with none saved says so once per tab, not every time.
+  const enableHintShownRef = useRef(false);
   // When plink was started and nothing has come back yet. An unreachable
   // host printed nothing for 35 s or more: a black terminal under a green
   // dot and a green "Terminal ready", which read as connected but hung.
@@ -323,9 +329,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [copiedVaultKey, setCopiedVaultKey] = useState<'login' | 'enable' | null>(null);
   const recentOutputRef = useRef('');
 
+  // "Send it when the device asks" as last saved in this window: the
+  // session file may not be written yet when a lookup reads it.
+  const savedAutoEnableRef = useRef<boolean | undefined>(undefined);
   const refreshVault = useCallback(async () => {
     try {
       const found = await vaultLookup(tab.sessionName, tab.hostname, tab.username);
+      if (savedAutoEnableRef.current !== undefined) found.autoEnable = savedAutoEnableRef.current;
       setVault(found);
       if (found.locked) setVaultExists(await vaultIsInitialized());
     } catch {
@@ -336,25 +346,37 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   useEffect(() => {
     void refreshVault();
     const onChange = () => void refreshVault();
+    // The session's settings saved: "Send it when the device asks" and the
+    // entry it uses may have changed.
+    const onSaved = (e: Event) => {
+      const detail = (e as CustomEvent<SessionSavedDetail>).detail;
+      if (detail?.name !== tab.sessionName) return;
+      savedAutoEnableRef.current = detail.autoEnable;
+      void refreshVault();
+    };
     window.addEventListener(VAULT_CHANGED_EVENT, onChange);
-    return () => window.removeEventListener(VAULT_CHANGED_EVENT, onChange);
-  }, [refreshVault]);
+    window.addEventListener(SESSION_SAVED_EVENT, onSaved);
+    return () => {
+      window.removeEventListener(VAULT_CHANGED_EVENT, onChange);
+      window.removeEventListener(SESSION_SAVED_EVENT, onSaved);
+    };
+  }, [refreshVault, tab.sessionName]);
 
-  const sendVaultSecret = async (field: 'login' | 'enable') => {
-    if (!vaultKey) return;
+  const sendVaultSecret = async (field: 'login' | 'enable', key: string | null = vaultKey) => {
+    if (!key) return;
     const label = field === 'enable' ? 'enable password' : 'password';
     // Away from a password prompt the device echoes what's typed: at a shell
     // prompt the password would show on screen, run as a command and land
     // in the remote history and the session log.
     if (!detectedPasswordPrompt && !(await askConfirm({
       title: `Type the ${label} anyway?`,
-      body: `No password prompt is showing. If the device echoes what is typed, the ${label} from "${vaultKey}" will be visible, and may land in its history and the session log.`,
+      body: `No password prompt is showing. If the device echoes what is typed, the ${label} from "${key}" will be visible, and may land in its history and the session log.`,
       confirmLabel: `Type ${label}`,
       danger: true,
     }))) return;
     try {
-      await vaultSendSecret(tab.id, vaultKey, field);
-      addEventLog(`Sent the ${label} from vault entry "${vaultKey}"`, 'info');
+      await vaultSendSecret(tab.id, key, field);
+      addEventLog(`Sent the ${label} from vault entry "${key}"`, 'info');
       setDetectedPasswordPrompt(null);
     } catch (e) {
       addEventLog(`Vault: ${String(e)}`, 'error');
@@ -363,6 +385,38 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   };
   const handleSendVaultPassword = () => sendVaultSecret('login');
   const handleSendVaultEnablePassword = () => sendVaultSecret('enable');
+
+  /** "Send Enable Password" from the menu or Ctrl+Shift+E. Always offered,
+   *  so it can be found: with none saved it says so and offers to add one;
+   *  with the vault locked it asks to unlock, then sends. */
+  const requestEnablePassword = () => {
+    if (isLocalSession) return;
+    if (vault && !vault.locked && vault.key && vault.hasEnableSecret) {
+      setEnableNotice(null);
+      void sendVaultSecret('enable');
+    } else if (vault?.locked && vaultExists) {
+      unlockThenEnableRef.current = true;
+      setUnlockOpen(true);
+    } else {
+      setEnableNotice(vault?.locked && !vaultExists ? 'noVault' : 'none');
+    }
+  };
+  const requestEnableRef = useRef(requestEnablePassword);
+  requestEnableRef.current = requestEnablePassword;
+
+  // Unlocked to send the enable password: look the entry up again (the
+  // state above is from before) and send it, or say there is none.
+  const afterUnlock = async () => {
+    if (!unlockThenEnableRef.current) return;
+    unlockThenEnableRef.current = false;
+    try {
+      const found = await vaultLookup(tab.sessionName, tab.hostname, tab.username);
+      if (found.key && found.hasEnableSecret) await sendVaultSecret('enable', found.key);
+      else setEnableNotice('none');
+    } catch (e) {
+      addEventLog(`Vault: ${String(e)}`, 'error');
+    }
+  };
 
   const copyVaultSecret = async (field: 'login' | 'enable') => {
     if (!vaultKey) return;
@@ -412,10 +466,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const autoRespondRef = useRef<(kind: 'login' | 'enable' | null, recent: string) => boolean>(() => false);
   autoRespondRef.current = (kind, recent) => {
     const v = vault;
-    if (!v || v.locked || !v.key) return false;
-    const key = v.key;
     const cmd = typedRef.current.submitted;
     const justAskedForEnable = !!cmd && isPrivilegeCommand(cmd.line) && Date.now() - cmd.at < 5000;
+    // The device asks for an enable password and none is saved: say where
+    // one goes, once per tab. (A locked vault has its own note.)
+    if (kind && justAskedForEnable && !isLocalSession && !enableHintShownRef.current
+        && !(v?.locked && vaultExists) && !(v && !v.locked && v.key && v.hasEnableSecret)) {
+      enableHintShownRef.current = true;
+      setEnableNotice(v?.locked ? 'noVault' : 'none');
+    }
+    if (!v || v.locked || !v.key) return false;
+    const key = v.key;
     const autoSend = (field: 'login' | 'enable') =>
       vaultSendSecret(tab.id, key, field)
         .then(() => addEventLog(`Sent the ${field === 'enable' ? 'enable password' : 'password'} automatically (vault entry "${key}")`, 'info'))
@@ -1208,10 +1269,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         return false;
       }
       const action = terminalShortcut(e);
-      if (!action) return true;
+      if (!action || (action === 'sendEnable' && isLocalSession)) return true;
       e.preventDefault();
       if (e.type !== 'keydown') return false;
-      if (action === 'copy') {
+      if (action === 'sendEnable') {
+        requestEnableRef.current();
+      } else if (action === 'copy') {
         const selection = term.getSelection();
         if (selection) void writeClipboard(selection);
       } else if (action === 'selectAll') {
@@ -1512,7 +1575,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       handlePaste();
       return;
     }
-    const x = Math.min(e.clientX, window.innerWidth - 240);
+    const x = Math.min(e.clientX, window.innerWidth - 280);
     setContextMenu({ x, y: e.clientY });
   };
 
@@ -1774,7 +1837,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                     </div>
                   ) : (
                     <div className="py-1">
-                      <button
+                      {vault?.hasLoginSecret !== false && <button
                         onClick={() => {
                           handleSendVaultPassword();
                           setIsVaultMenuOpen(false);
@@ -1783,20 +1846,20 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                       >
                         <Zap className="w-3.5 h-3.5 text-slate-400" />
                         <span>Send Login Password</span>
-                      </button>
+                      </button>}
 
-                      {vault?.hasEnableSecret && (
-                        <button
-                          onClick={() => {
-                            handleSendVaultEnablePassword();
-                            setIsVaultMenuOpen(false);
-                          }}
-                          className="w-full flex items-center space-x-2 px-3 py-1.5 hover:bg-sky-600/20 hover:text-sky-100 text-left transition"
-                        >
-                          <Shield className="w-3.5 h-3.5 text-slate-400" />
-                          <span>Send Enable Password</span>
-                        </button>
-                      )}
+                      <button
+                        onClick={() => {
+                          requestEnablePassword();
+                          setIsVaultMenuOpen(false);
+                        }}
+                        aria-keyshortcuts="Control+Shift+E"
+                        className="w-full flex items-center space-x-2 px-3 py-1.5 hover:bg-sky-600/20 hover:text-sky-100 text-left transition"
+                      >
+                        <Shield className="w-3.5 h-3.5 text-slate-400" />
+                        <span className="flex-1">Send Enable Password</span>
+                        <span className="text-meta text-plinky-muted">{vault?.hasEnableSecret ? 'Ctrl+Shift+E' : 'none saved'}</span>
+                      </button>
 
                       <div className="border-t border-plinky-800 my-1" />
 
@@ -2141,7 +2204,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             after hopping to another host the prompt may not be this
             session's. An enable prompt is only offered an enable password. */}
         {detectedPasswordPrompt && vaultKey && isVaultUnlocked &&
-          (detectedPasswordPrompt === 'login' || vault?.hasEnableSecret) && (
+          (detectedPasswordPrompt === 'login' ? vault?.hasLoginSecret !== false : vault?.hasEnableSecret) && (
           <div className="absolute top-3 right-14 z-30 flex items-center space-x-2 bg-plinky-900/95 border border-amber-500/60 text-amber-200 px-3 py-1.5 rounded-lg shadow-2xl backdrop-blur-md animate-in fade-in slide-in-from-top-2 duration-150 text-xs">
             <Key className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
             <span className="font-medium">
@@ -2180,11 +2243,38 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           </div>
         )}
 
+        {/* Asked for the enable password with none saved: where it goes. */}
+        {enableNotice && !(detectedPasswordPrompt && vault?.locked && vaultExists) && (
+          <div role="status" className="absolute top-3 right-14 z-30 flex items-center gap-2 bg-plinky-900/95 border border-slate-600 text-slate-200 px-3 py-1.5 rounded-lg shadow-2xl text-xs">
+            <Shield className="w-3.5 h-3.5 text-slate-400 shrink-0" aria-hidden="true" />
+            <span>
+              {enableNotice === 'noVault'
+                ? 'No enable password saved: there is no vault yet.'
+                : 'No enable password saved for this session.'}
+            </span>
+            {onEditSessionSettings ? (
+              <button
+                onClick={() => { setEnableNotice(null); onEditSessionSettings('credentials'); }}
+                className="px-2 py-0.5 rounded border border-slate-500 text-slate-100 hover:bg-plinky-800"
+              >
+                Add one…
+              </button>
+            ) : (
+              <span className="text-plinky-muted">Save the session, then add one in its settings.</span>
+            )}
+            <button onClick={() => setEnableNotice(null)} className="p-0.5 text-slate-400 hover:text-white rounded" aria-label="Dismiss" title="Dismiss">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
         {unlockOpen && (
           <VaultUnlockDialog
-            reason="This prompt's password is in the vault. Unlock it and Thyrion can send it."
-            onUnlocked={() => { setUnlockOpen(false); terminalRef.current?.focus(); }}
-            onCancel={() => { setUnlockOpen(false); terminalRef.current?.focus(); }}
+            reason={unlockThenEnableRef.current
+              ? "This session's enable password is in the vault. Unlock it and Thyrion sends it."
+              : "This prompt's password is in the vault. Unlock it and Thyrion can send it."}
+            onUnlocked={() => { setUnlockOpen(false); terminalRef.current?.focus(); void afterUnlock(); }}
+            onCancel={() => { setUnlockOpen(false); unlockThenEnableRef.current = false; terminalRef.current?.focus(); }}
           />
         )}
 
@@ -2204,7 +2294,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         {contextMenu && (
           <div
             ref={contextMenuRef}
-            className="fixed z-40 w-60 max-h-[calc(100vh-16px)] overflow-y-auto bg-plinky-900 border border-plinky-700/80 rounded-lg shadow-2xl py-1 text-slate-200 text-xs select-none backdrop-blur-md animate-in fade-in zoom-in-95 duration-100"
+            className="fixed z-40 w-[17rem] max-h-[calc(100vh-16px)] overflow-y-auto bg-plinky-900 border border-plinky-700/80 rounded-lg shadow-2xl py-1 text-slate-200 text-xs select-none backdrop-blur-md animate-in fade-in zoom-in-95 duration-100"
             style={{ left: contextMenu.x, top: contextMenu.y }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -2232,41 +2322,43 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               <span className="flex-1">Select All</span>
               <span className="text-meta text-plinky-muted">Ctrl+Shift+A</span>
             </button>
-            {vaultKey && (
+            {/* The vault's passwords. "Send Enable Password" is listed for
+                every session, saved one or not, so it can be found; with
+                none saved it says where one goes (requestEnablePassword). */}
+            {!isLocalSession && (
               <>
                 <div className="border-t border-plinky-800 my-1" />
                 <div className="px-3 py-1 text-meta font-semibold uppercase tracking-wider text-plinky-muted flex items-center space-x-1">
                   <Shield className="w-3 h-3 text-slate-400" />
-                  <span>Vault ({vaultKey})</span>
+                  <span>{vaultKey ? `Vault (${vaultKey})` : 'Vault'}</span>
                 </div>
-                <button
-                  onClick={() => {
-                    setContextMenu(null);
-                    handleSendVaultPassword();
-                  }}
-                  disabled={!isVaultUnlocked}
-                  className={`w-full flex items-center space-x-2 px-3 py-1.5 text-left transition ${
-                    isVaultUnlocked ? 'hover:bg-sky-600/20 text-slate-200' : 'text-plinky-muted cursor-not-allowed'
-                  }`}
-                >
-                  <Key className="w-3.5 h-3.5 text-slate-400" />
-                  <span>Send Login Password</span>
-                </button>
-                {vault?.hasEnableSecret && (
+                {vaultKey && vault?.hasLoginSecret !== false && (
                   <button
                     onClick={() => {
                       setContextMenu(null);
-                      handleSendVaultEnablePassword();
+                      handleSendVaultPassword();
                     }}
                     disabled={!isVaultUnlocked}
                     className={`w-full flex items-center space-x-2 px-3 py-1.5 text-left transition ${
                       isVaultUnlocked ? 'hover:bg-sky-600/20 text-slate-200' : 'text-plinky-muted cursor-not-allowed'
                     }`}
                   >
-                    <Shield className="w-3.5 h-3.5 text-slate-400" />
-                    <span>Send Enable Password</span>
+                    <Key className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Send Login Password</span>
                   </button>
                 )}
+                <button
+                  onClick={() => {
+                    setContextMenu(null);
+                    requestEnablePassword();
+                  }}
+                  aria-keyshortcuts="Control+Shift+E"
+                  className="w-full flex items-center space-x-2 px-3 py-1.5 text-left transition hover:bg-sky-600/20 text-slate-200"
+                >
+                  <Shield className="w-3.5 h-3.5 text-slate-400" />
+                  <span className="flex-1 whitespace-nowrap">Send Enable Password</span>
+                  <span className="text-meta text-plinky-muted whitespace-nowrap">Ctrl+Shift+E</span>
+                </button>
               </>
             )}
             <div className="border-t border-plinky-800 my-1" />

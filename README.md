@@ -42,8 +42,9 @@ that is already open. Set GNS3's console command to
 - **Move files without leaving the terminal.** A two-pane file browser for
   uploads, downloads and remote folders.
 - **Keep passwords in an encrypted vault.** Log in automatically, including
-  through a jump host, and send network devices their enable password when
-  they ask for it. Passwords stay in the vault, not in PuTTY's session files.
+  through a jump host. A session's enable password sits next to its login
+  password, and is sent when the device asks or when you press Ctrl+Shift+E.
+  Passwords stay in the vault, not in PuTTY's session files.
   [How your passwords are protected](docs/PASSWORDS.md).
 - **Reach hosts behind a gateway.** Connect through a jump host / bastion with
   one setting.

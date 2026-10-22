@@ -35,7 +35,7 @@ export async function waitUntil(check, { timeoutMs = 5000, what = 'condition' } 
  * Nothing is printed on connect: a router sitting at its prompt prints
  * nothing until it is sent Enter.
  */
-export async function startConsole({ name = 'R1', negotiate = true, host = '127.0.0.1', onlyFrom = null, greet = false, mark = '>', replies = null, port = 0 } = {}) {
+export async function startConsole({ name = 'R1', negotiate = true, host = '127.0.0.1', onlyFrom = null, greet = false, mark = '>', replies = null, port = 0, enableSecret = null } = {}) {
   const con = {
     name,
     received: Buffer.alloc(0), // data bytes, telnet commands removed
@@ -45,8 +45,10 @@ export async function startConsole({ name = 'R1', negotiate = true, host = '127.
     connections: 0,
     open: 0,
     sockets: new Set(),
+    enabled: false,            // in privileged mode (enableSecret)
   };
-  const prompt = `${name}${mark}`;
+  const userPrompt = `${name}${mark}`;
+  let prompt = userPrompt;
 
   const handle = (sock) => {
     // Listening beyond this machine (a Windows VM on the LAN): one peer only.
@@ -66,11 +68,26 @@ export async function startConsole({ name = 'R1', negotiate = true, host = '127.
     let state = 'data';
     let verb = 0;
     let sb = [];
+    // With `enableSecret`, `enable` (en, super) asks "Password:" like IOS,
+    // without echoing the answer; the right one gives the "#" prompt.
+    let askingEnable = false;
     const say = (s) => sock.write(Buffer.from(s, 'utf8'));
 
     const accept = (text) => {
       con.lines.push(text);
+      if (askingEnable) {
+        askingEnable = false;
+        if (text === enableSecret) { con.enabled = true; prompt = `${name}#`; say(`\r\n${prompt}`); }
+        else say(`\r\n% Access denied\r\n\r\n${prompt}`);
+        return;
+      }
       const cmd = text.trim();
+      if (enableSecret !== null && /^(?:en|ena|enab|enabl|enable|super)$/.test(cmd) && !con.enabled) {
+        askingEnable = true;
+        say('\r\nPassword: ');
+        return;
+      }
+      if (enableSecret !== null && cmd === 'disable') { con.enabled = false; prompt = userPrompt; say(`\r\n${prompt}`); return; }
       if (cmd === 'exit') { say('\r\n'); sock.end(); return; }
       let out = '';
       const big = cmd.match(/^show big (\d+)$/);
@@ -124,7 +141,7 @@ export async function startConsole({ name = 'R1', negotiate = true, host = '127.
       }
       if (b === 0x1b || b < 0x20) return; // keys the stand-in does not edit with
       line += String.fromCharCode(b);
-      if (negotiate) sock.write(Buffer.from([b]));
+      if (negotiate && !askingEnable) sock.write(Buffer.from([b]));
     };
 
     sock.on('data', (chunk) => {
