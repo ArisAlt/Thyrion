@@ -23,6 +23,14 @@ ignore = [
     "RUSTSEC-2025-0081", # unic-char-property
     "RUSTSEC-2025-0098", # unic-ucd-version
     "RUSTSEC-2025-0100", # unic-ucd-ident
+    # zbus_names, zvariant and zvariant_derive were folded into zbus 6.
+    # They come from zbus 5, which tauri-plugin-opener and
+    # tauri-plugin-single-instance still require (^5.9, up to 2.7.2 and
+    # 2.5.4 and the 3.0 alphas; checked 2026-10-22). Drop these three once
+    # both plugins move to zbus 6.
+    "RUSTSEC-2026-0370", # zvariant
+    "RUSTSEC-2026-0371", # zbus_names
+    "RUSTSEC-2026-0372", # zvariant_derive
 ]
 
 [licenses]
