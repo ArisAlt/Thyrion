@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { VaultManager } from '../components/vault/VaultManager';
-import { vaultExportKdbx, vaultIsUnlocked, vaultListEntriesMeta, vaultGetEntry, vaultSetEntry } from '../services/tauriBridge';
+import { vaultExportKdbx, vaultIsUnlocked, vaultListEntriesMeta, vaultGetEntry, vaultSetEntry, vaultDelete } from '../services/tauriBridge';
 
 vi.mock('../services/tauriBridge', () => ({
   vaultIsInitialized: vi.fn().mockResolvedValue(true),
@@ -168,5 +168,25 @@ describe('adding a vault entry', () => {
     await waitFor(() => expect(vaultSetEntry).toHaveBeenCalledTimes(1));
     // Kept exactly as typed, spaces included.
     expect(vi.mocked(vaultSetEntry).mock.calls[0][0]).toMatchObject({ id: 'session:R9', secret: '', enable_secret: ' en4ble ' });
+  });
+});
+
+describe('removing the only password of an enable-only entry', () => {
+  it('deletes the entry instead of saving one with no password', async () => {
+    const stored = { id: 'session:R9', secret: '', enable_secret: 'en4ble', created_at: 5, updated_at: 5 };
+    vi.mocked(vaultIsUnlocked).mockResolvedValue(true);
+    vi.mocked(vaultListEntriesMeta).mockResolvedValue([
+      { id: stored.id, has_enable_secret: true, has_login_secret: false, created_at: 5, updated_at: 5 },
+    ]);
+    vi.mocked(vaultGetEntry).mockResolvedValue({ ...stored });
+    vi.mocked(vaultSetEntry).mockReset().mockResolvedValue(true);
+    vi.mocked(vaultDelete).mockReset().mockResolvedValue(true);
+    render(<VaultManager />);
+    fireEvent.click(await screen.findByLabelText(`Edit ${stored.id}`));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    expect(screen.getByText(/only password, so saving deletes the entry/)).toBeTruthy();
+    fireEvent.click(screen.getByText('Save Changes'));
+    await waitFor(() => expect(vaultDelete).toHaveBeenCalledWith(stored.id));
+    expect(vaultSetEntry).not.toHaveBeenCalled();
   });
 });

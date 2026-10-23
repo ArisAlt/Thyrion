@@ -107,6 +107,9 @@ pub struct VaultEntryMeta {
     pub id: String,
     pub username: Option<String>,
     pub has_enable_secret: bool,
+    /// False for an entry that holds only an enable password.
+    #[serde(default)]
+    pub has_login_secret: bool,
     pub notes: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
@@ -118,6 +121,7 @@ impl From<&VaultEntry> for VaultEntryMeta {
             id: e.id.clone(),
             username: e.username.clone(),
             has_enable_secret: e.has_enable(),
+            has_login_secret: e.has_login(),
             notes: e.notes.clone(),
             created_at: e.created_at,
             updated_at: e.updated_at,
@@ -616,10 +620,12 @@ mod tests {
         assert!(!console.has_login());
         assert!(console.has_enable());
         assert!(VaultEntryMeta::from(&console).has_enable_secret);
+        assert!(!VaultEntryMeta::from(&console).has_login_secret);
 
         let server = VaultEntry::new("session:web", "pw");
         assert!(server.has_login());
         assert!(!server.has_enable());
+        assert!(VaultEntryMeta::from(&server).has_login_secret);
         assert!(!VaultEntry::new("x", "pw").with_enable_secret("").has_enable());
     }
 
