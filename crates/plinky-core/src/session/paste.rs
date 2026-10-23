@@ -122,12 +122,12 @@ impl Echoes {
         out[after..].contains(&b'\n')
     }
 
-    /// Waits for `line` to be echoed after `mark`. Gives up (false) once
-    /// the console has printed nothing for `ECHO_QUIET` (it doesn't echo,
-    /// or swallowed the line), or after `ECHO_MAX` in all. Not a fixed time
-    /// per line: a C891F at 9600 baud took 1.4 s to echo a 150-character
-    /// line it scrolled sideways (1.3 KB of redraws).
-    pub async fn wait_for(&self, mark: u64, line: &[u8]) -> bool {
+    /// Waits for `line` to be echoed after `mark`; how long that took, or
+    /// None once the console has printed nothing for `quiet` (it doesn't
+    /// echo, or swallowed the line) or after `ECHO_MAX` in all. Silence,
+    /// not a fixed time per line: a C891F at 9600 baud took 1.4 s to echo
+    /// a 150-character line it scrolled sideways (1.3 KB of redraws).
+    pub async fn wait_for(&self, mark: u64, line: &[u8], quiet: Duration) -> Option<Duration> {
         let started = Instant::now();
         let deadline = started + ECHO_MAX;
         loop {
@@ -135,20 +135,37 @@ impl Echoes {
             tokio::pin!(more);
             more.as_mut().enable();
             if self.echoed(mark, line) {
-                return true;
+                return Some(started.elapsed());
             }
             let heard = self.recent.lock().unwrap().at.map_or(started, |at| at.max(started));
-            let until = (heard + ECHO_QUIET).min(deadline);
+            let until = (heard + quiet).min(deadline);
             if Instant::now() >= until {
-                return false;
+                return None;
             }
             let _ = tokio::time::timeout_at(until.into(), more).await;
         }
     }
 }
 
+/// How long a line whose echo doesn't come waits on a silent console,
+/// given how long this paste's echoed lines took: their median, once there
+/// are a few of them (a line with no echo, such as a password, then costs
+/// about what an echoed one does: ~0.1 s on a C891F at 9600 baud), and
+/// `ECHO_QUIET` until then. Never more than `ECHO_QUIET`.
+pub fn quiet_after(echo_times: &[Duration]) -> Duration {
+    if echo_times.len() < ECHO_SAMPLES {
+        return ECHO_QUIET;
+    }
+    let mut sorted = echo_times.to_vec();
+    sorted.sort();
+    sorted[sorted.len() / 2].min(ECHO_QUIET)
+}
+
+/// Echoed lines a paste measures before it trusts their median.
+const ECHO_SAMPLES: usize = 3;
+
 /// How long a pasted line waits on a silent console for its echo before
-/// the next goes anyway.
+/// the next goes anyway, before the paste has measured its echoes.
 const ECHO_QUIET: Duration = Duration::from_secs(1);
 /// The longest a line waits for its echo while the console keeps printing
 /// other things.
@@ -187,12 +204,15 @@ impl SessionRegistry {
         let echo = self.paste_echo(id);
         let mut sent = 0;
         let mut waiting: Option<(u64, Vec<u8>)> = None;
+        let mut echo_times = Vec::new();
         for line in lines {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
             if let (Some(echo), Some((mark, last))) = (&echo, waiting.take()) {
-                echo.wait_for(mark, &last).await;
+                if let Some(took) = echo.wait_for(mark, &last, quiet_after(&echo_times)).await {
+                    echo_times.push(took);
+                }
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
@@ -295,17 +315,26 @@ mod tests {
             feed.saw(b"show clock\r\nR1#");
         });
         let started = Instant::now();
-        assert!(e.wait_for(mark, b"show clock\r").await);
-        assert!(started.elapsed() >= Duration::from_millis(1400), "{:?}", started.elapsed());
+        let took = e.wait_for(mark, b"show clock\r", ECHO_QUIET).await.expect("echoed");
+        assert!(took >= Duration::from_millis(1400), "{took:?}");
     }
 
     #[tokio::test]
     async fn a_silent_console_is_given_up_on_after_a_second() {
         let e = Echoes::default();
         let started = Instant::now();
-        assert!(!e.wait_for(e.mark(), b"show clock\r").await);
+        assert_eq!(e.wait_for(e.mark(), b"show clock\r", ECHO_QUIET).await, None);
         let took = started.elapsed();
         assert!(took >= Duration::from_millis(950) && took < Duration::from_millis(1500), "{took:?}");
+    }
+
+    #[test]
+    fn an_unechoed_line_waits_the_median_echo_once_there_are_a_few() {
+        let ms = Duration::from_millis;
+        assert_eq!(quiet_after(&[]), ECHO_QUIET);
+        assert_eq!(quiet_after(&[ms(90), ms(110)]), ECHO_QUIET, "too few to go by");
+        assert_eq!(quiet_after(&[ms(110), ms(90), ms(1400), ms(100), ms(95)]), ms(100));
+        assert_eq!(quiet_after(&[ms(3000), ms(4000), ms(5000)]), ECHO_QUIET, "never longer than before");
     }
 
     #[test]

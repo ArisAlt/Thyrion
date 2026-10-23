@@ -947,9 +947,10 @@ mod line_tests {
     /// A router's console: what arrives goes into a small input buffer
     /// (what doesn't fit is lost), is handled at ~1 ms a byte, echoed, and
     /// Enter prints the prompt. With `logging`, a log message goes out as
-    /// each line starts to arrive, line feeds and all. Returns the lines it
-    /// received.
-    fn slow_console(console: File, logging: bool) -> Arc<Mutex<Vec<String>>> {
+    /// each line starts to arrive, line feeds and all. Only the first
+    /// `echoed` lines are echoed; the rest are taken in silence. Returns the
+    /// lines it received.
+    fn slow_console(console: File, logging: bool, echoed: usize) -> Arc<Mutex<Vec<String>>> {
         const BUFFER: usize = 64;
         let lines = Arc::new(Mutex::new(Vec::new()));
         let pending = Arc::new(Mutex::new(VecDeque::<u8>::new()));
@@ -978,6 +979,7 @@ mod line_tests {
             loop {
                 std::thread::sleep(Duration::from_millis(1));
                 let Some(c) = pending.lock().unwrap().pop_front() else { continue };
+                let silent = seen.lock().unwrap().len() >= echoed;
                 let shown = if c == b'\r' {
                     seen.lock().unwrap().push(std::mem::take(&mut line));
                     b"\r\nR1#".to_vec()
@@ -985,6 +987,9 @@ mod line_tests {
                     line.push(c as char);
                     vec![c]
                 };
+                if silent {
+                    continue;
+                }
                 if output.write_all(&shown).is_err() {
                     return;
                 }
@@ -1011,7 +1016,7 @@ mod line_tests {
         // fast as the line takes it, and a console that can't keep up drops
         // what it can't hold.
         let (console, line) = pty();
-        let got = slow_console(console, false);
+        let got = slow_console(console, false, usize::MAX);
         let registry = SessionRegistry::new();
         let (tx, _rx) = mpsc::unbounded_channel();
         registry.create_serial_session("s", "R1", &config(&line), None, tx).unwrap();
@@ -1026,7 +1031,7 @@ mod line_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_paced_paste_waits_for_each_line_to_be_echoed() {
         let (console, line) = pty();
-        let got = slow_console(console, false);
+        let got = slow_console(console, false, usize::MAX);
         let registry = SessionRegistry::new();
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
         // Something has to read the session's output, as the page does.
@@ -1049,7 +1054,7 @@ mod line_tests {
         // Its line feeds come before the line's echo. Counting any line feed
         // as the echo sent the next line into a full buffer.
         let (console, line) = pty();
-        let got = slow_console(console, true);
+        let got = slow_console(console, true, usize::MAX);
         let registry = SessionRegistry::new();
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
         tokio::spawn(async move { while rx.recv().await.is_some() {} });
@@ -1061,6 +1066,27 @@ mod line_tests {
         wait_for(&got, 20).await;
         assert_eq!(*got.lock().unwrap(), want);
         assert!(started.elapsed() < Duration::from_secs(3), "took {:?}", started.elapsed());
+        let _ = registry.close_session("s");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_line_that_is_never_echoed_waits_about_as_long_as_an_echoed_one() {
+        // Once a paste has seen a few echoes, a line with none (a password,
+        // a console that stopped echoing) waits their median, not 1 s.
+        let (console, line) = pty();
+        let got = slow_console(console, false, 5);
+        let registry = SessionRegistry::new();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        registry.create_serial_session("s", "R1", &config(&line), None, tx).unwrap();
+        let (text, want) = config_text();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let started = Instant::now();
+        registry.paste_paced("s", &text, Duration::ZERO, cancel, |_, _| {}).await.unwrap();
+        // 15 silent lines at ~40 ms each, not 15 s.
+        assert!(started.elapsed() < Duration::from_secs(4), "took {:?}", started.elapsed());
+        wait_for(&got, 20).await;
+        assert_eq!(*got.lock().unwrap(), want);
         let _ = registry.close_session("s");
     }
 
