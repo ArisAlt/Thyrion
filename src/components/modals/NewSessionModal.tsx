@@ -11,6 +11,7 @@ import {
   VAULT_CHANGED_EVENT,
 } from '../../services/tauriBridge';
 import { VaultUnlockDialog } from '../vault/VaultUnlockDialog';
+import { sessionsUsingVaultEntry } from '../../services/vaultKeys';
 import { TAB_COLORS, LogonAction, parseLogonActions, serializeLogonActions } from '../../services/tabColors';
 import { TERMINAL_THEMES, MATCH_INTERFACE, findTerminalTheme, useTerminalTheme } from '../../themes/terminalThemes';
 import { TERMINAL_FONTS, DEFAULT_TERMINAL_FONT } from '../../themes/fonts';
@@ -607,11 +608,11 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
   const typedKey = vaultKeyId.trim();
   const keyIsSaved = !!typedKey && (typedKey === savedVaultKey || vaultEntries.some(v => v.id === typedKey));
   // The other saved sessions that use vault entry `key`: linked to it, or
-  // its implicit owner ("session:<name>" with no link of its own).
-  const vaultEntryUsers = (key: string) => savedSessions
-    .filter(s => s.name !== editingSession?.name)
-    .filter(s => s.extra?.PlinkyVaultKey ? s.extra.PlinkyVaultKey === key : key === `session:${s.name}`)
-    .map(s => s.name);
+  // finding it under one of the backend's fallback names (a bare session
+  // name, user@host, host). Only the link and "session:<name>" were
+  // counted, so an entry shared through a fallback name was deleted.
+  const vaultEntryUsers = (key: string) =>
+    sessionsUsingVaultEntry(key, savedSessions, new Set(vaultEntries.map(v => v.id)), editingSession?.name);
   // The entry the enable password comes from, and whether it has one.
   const enableEntryKey = useVault ? (vaultMode === 'link' ? selectedVaultKey : typedKey) : '';
   const enableSaved = !!enableEntryKey && !!vaultEntries.find(v => v.id === enableEntryKey)?.has_enable_secret;

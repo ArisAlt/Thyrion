@@ -853,6 +853,8 @@ fn shown(e: plinky_core::errors::PlinkyError) -> String {
 /// "session:prod-web or server.internal". Nothing used to honour those:
 /// an entry saved as "session:Server 2" or "192.0.2.10" was ignored, so
 /// SFTP asked for a password and the terminal never offered the vault.
+/// src/services/vaultKeys.ts has the same rule, to tell which sessions use
+/// an entry before one is deleted: keep the two in step.
 fn vault_key_candidates(
     session_name: &str,
     explicit: Option<&str>,

@@ -1090,6 +1090,26 @@ describe('removing the only password of an enable-only entry', () => {
     expect(saved.extra.PlinkyVaultKey).toBeUndefined();
   });
 
+  it('only unlinks when another session finds the entry by its host, with no link', async () => {
+    // The backend also looks entries up by "user@host", "host" and the bare
+    // session name; such a session would have lost its enable password.
+    mockVaultListEntriesMeta.mockResolvedValue([
+      { id: '192.0.2.9', has_enable_secret: true, has_login_secret: false },
+    ]);
+    mockVaultGetEntry.mockResolvedValue({ ...stored, id: '192.0.2.9' });
+    const linked = { ...console1, extra: { PlinkyVaultKey: '192.0.2.9' } };
+    const byHost = { name: 'R9 spare', hostname: '192.0.2.9', port: 23, protocol: 'Telnet', extra: {} };
+    const onSave = vi.fn();
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} editingSession={linked} savedSessions={[linked, byHost]} />);
+    fireEvent.click(screen.getByRole('tab', { name: /Credentials & Vault/i }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove' }));
+    expect(screen.getByRole('status').textContent).toMatch(/R9 spare also uses it, so saving only unlinks this session/);
+    fireEvent.click(screen.getByRole('button', { name: /^save changes$/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(mockVaultDelete).not.toHaveBeenCalled();
+    expect(onSave.mock.calls[0][0].extra.PlinkyVaultKey).toBeUndefined();
+  });
+
   it('keeps the dialog open when the entry cannot be deleted', async () => {
     mockVaultDelete.mockResolvedValue(false);
     const onSave = vi.fn();
