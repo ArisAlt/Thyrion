@@ -946,18 +946,26 @@ mod line_tests {
 
     /// A router's console: what arrives goes into a small input buffer
     /// (what doesn't fit is lost), is handled at ~1 ms a byte, echoed, and
-    /// Enter prints the prompt. Returns the lines it received.
-    fn slow_console(console: File) -> Arc<Mutex<Vec<String>>> {
+    /// Enter prints the prompt. With `logging`, a log message goes out as
+    /// each line starts to arrive, line feeds and all. Returns the lines it
+    /// received.
+    fn slow_console(console: File, logging: bool) -> Arc<Mutex<Vec<String>>> {
         const BUFFER: usize = 64;
         let lines = Arc::new(Mutex::new(Vec::new()));
         let pending = Arc::new(Mutex::new(VecDeque::<u8>::new()));
         let (mut input, mut output) = (console.try_clone().unwrap(), console);
+        let mut log = output.try_clone().unwrap();
         let fill = pending.clone();
         std::thread::spawn(move || {
             let mut b = [0u8; 4096];
+            let mut line_start = true;
             while let Ok(n @ 1..) = input.read(&mut b) {
                 let mut q = fill.lock().unwrap();
                 for &c in &b[..n] {
+                    if logging && line_start {
+                        let _ = log.write_all(b"\r\n*Oct 23 19:40:01: %LINK-3-UPDOWN: Interface Gi7, changed state to up\r\n");
+                    }
+                    line_start = c == b'\r';
                     if q.len() < BUFFER {
                         q.push_back(c);
                     }
@@ -1003,7 +1011,7 @@ mod line_tests {
         // fast as the line takes it, and a console that can't keep up drops
         // what it can't hold.
         let (console, line) = pty();
-        let got = slow_console(console);
+        let got = slow_console(console, false);
         let registry = SessionRegistry::new();
         let (tx, _rx) = mpsc::unbounded_channel();
         registry.create_serial_session("s", "R1", &config(&line), None, tx).unwrap();
@@ -1018,7 +1026,7 @@ mod line_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_paced_paste_waits_for_each_line_to_be_echoed() {
         let (console, line) = pty();
-        let got = slow_console(console);
+        let got = slow_console(console, false);
         let registry = SessionRegistry::new();
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
         // Something has to read the session's output, as the page does.
@@ -1032,6 +1040,26 @@ mod line_tests {
         wait_for(&got, 20).await;
         assert_eq!(*got.lock().unwrap(), want);
         // ~37 bytes a line at 1 ms each: paced by the echo, not by timeouts.
+        assert!(started.elapsed() < Duration::from_secs(3), "took {:?}", started.elapsed());
+        let _ = registry.close_session("s");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_log_message_during_a_paced_paste_is_not_taken_for_the_echo() {
+        // Its line feeds come before the line's echo. Counting any line feed
+        // as the echo sent the next line into a full buffer.
+        let (console, line) = pty();
+        let got = slow_console(console, true);
+        let registry = SessionRegistry::new();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        registry.create_serial_session("s", "R1", &config(&line), None, tx).unwrap();
+        let (text, want) = config_text();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let started = Instant::now();
+        registry.paste_paced("s", &text, Duration::ZERO, cancel, |_, _| {}).await.unwrap();
+        wait_for(&got, 20).await;
+        assert_eq!(*got.lock().unwrap(), want);
         assert!(started.elapsed() < Duration::from_secs(3), "took {:?}", started.elapsed());
         let _ = registry.close_session("s");
     }
