@@ -65,7 +65,10 @@ export const PasteConfirmHost: React.FC = () => {
   if (!req) return null;
   const lines = pasteLineCount(text);
   const hidden = req.sensitive && !reveal;
-  const paced = !!req.lineDelayMs && lines > 1;
+  const paced = (!!req.lineDelayMs || !!req.echoPaced) && lines > 1;
+  const pacing = req.echoPaced
+    ? `, sent one line at a time as the device echoes each${req.lineDelayMs ? `, then ${req.lineDelayMs} ms` : ''}`
+    : `, sent one line at a time, ${req.lineDelayMs} ms apart`;
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-plinky-950/75 backdrop-blur-xs p-4">
@@ -84,7 +87,7 @@ export const PasteConfirmHost: React.FC = () => {
             </h3>
             <p id="paste-summary" className="text-xs text-slate-300 mt-1">
               {text.length} character{text.length === 1 ? '' : 's'}
-              {paced && `, sent one line at a time, ${req.lineDelayMs} ms apart`}
+              {paced && pacing}
             </p>
           </div>
         </div>

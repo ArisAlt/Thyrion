@@ -56,6 +56,8 @@ export interface PasteRequest {
   target: string;
   /** The session's paste line delay, when it paces multi-line pastes. */
   lineDelayMs?: number;
+  /** A serial line: each line waits for the device to echo the last. */
+  echoPaced?: boolean;
   /** At a password prompt: masked until the user asks to see it. */
   sensitive?: boolean;
 }

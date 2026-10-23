@@ -51,6 +51,50 @@ export const tests = [
     assert.deepEqual([...dev.received], [0x7f]);
   }],
 
+  ['a typed key is on screen within a frame or two of the echo', async ({ app, dev }) => {
+    // The device echoes at once here, so this is Thyrion's own path: the
+    // key to the line, the echo to the page, the page to the screen. On a
+    // real Cisco console at 9600 baud the echo itself takes 7-14 ms.
+    const took = await app.run(async (e) => {
+      const rows = [...document.querySelectorAll('.xterm')].find(e.visible).querySelector('.xterm-rows');
+      const times = [];
+      for (const ch of 'abcdefghij') {
+        times.push(await new Promise((resolve) => {
+          const before = rows.textContent;
+          const t0 = performance.now();
+          const mo = new MutationObserver(() => {
+            if (rows.textContent !== before) { mo.disconnect(); resolve(performance.now() - t0); }
+          });
+          mo.observe(rows, { subtree: true, childList: true, characterData: true });
+          e.type(ch);
+          setTimeout(() => { mo.disconnect(); resolve(Infinity); }, 2000);
+        }));
+      }
+      for (let i = 0; i < 10; i++) e.key('Backspace');
+      return times.sort((a, b) => a - b);
+    });
+    assert.ok(took[5] < 60, `median key to screen ${took[5]} ms (all: ${took.join(', ')})`);
+    assert.ok(took[9] < 250, `slowest key to screen ${took[9]} ms`);
+  }],
+
+  ['a multi-line paste goes one line at a time, each after the last one is echoed', async ({ app, dev }) => {
+    // A console sent a paste flat out falls behind its own echo and drops
+    // lines (a real C891F lost 1 line in 10, through PuTTY 1 in 5).
+    const lines = Array.from({ length: 30 }, (_, i) => `interface GigabitEthernet0/${i} description e2e paste ${'x'.repeat(i)}`);
+    await app.invoke('write_clipboard_text', { text: lines.map((l) => `${l}\n`).join('') });
+    dev.clear();
+    await app.run((e) => e.focusTerminal());
+    await app.key('Ctrl+Shift+V');
+    await app.waitFor(() => !!document.querySelector('[aria-labelledby="paste-title"]'), [], { what: 'the paste window' });
+    const summary = await app.run(() => document.getElementById('paste-summary').textContent);
+    assert.match(summary, /as the device echoes each/);
+    await app.key('Enter');
+    await dev.waitForLine(lines.at(-1), { timeoutMs: 15000 });
+    await sleep(200);
+    assert.deepEqual(dev.lines, lines);
+    await app.waitForScreen(`you typed: ${lines.at(-1)}`);
+  }],
+
   ['pulling out the USB adapter shows the tab as disconnected', async ({ app, dev }) => {
     dev.unplug();
     await app.waitForTab('Console Cable', 'disconnected', { timeoutMs: 5000 });

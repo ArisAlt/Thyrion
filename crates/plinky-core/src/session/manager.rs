@@ -126,6 +126,9 @@ pub struct ActiveSession {
     /// A jump through a device's CLI (see `expect`): runs its steps on the
     /// output, before and after Live, until done or stopped.
     pub expect: Option<super::expect::Expect>,
+    /// Line feeds printed so far: a paste on a serial line sends its next
+    /// line once the device has echoed the last one (see `paste`).
+    pub line_feeds: Arc<super::paste::LineFeeds>,
 }
 
 static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(1);
@@ -256,6 +259,7 @@ impl SessionRegistry {
                     if let Some(session) = lock.get_mut(&id_for_task).filter(|s| s.instance == instance) {
                         session.scrollback.push(&chunk);
                         session.feed_tap(&chunk);
+                        session.line_feeds.saw(&chunk);
                         // PuTTY-style "all session output" logging: every raw
                         // byte the PTY produces, regardless of PreAuth/Live
                         // state -- a failed write just leaves the session
@@ -368,6 +372,7 @@ impl SessionRegistry {
             expect: None,
             tap: None,
             logon: None,
+            line_feeds: Default::default(),
         };
 
         self.insert_new_session(id_owned, active)?;
@@ -493,6 +498,7 @@ impl SessionRegistry {
                     if let Some(session) = lock.get_mut(&id_for_task).filter(|s| s.instance == instance) {
                         session.scrollback.push(&chunk);
                         session.feed_tap(&chunk);
+                        session.line_feeds.saw(&chunk);
                         if let Some(log) = session.log.as_mut() {
                             // A log that can't be written any more (disk
                             // full, drive gone) is closed, not retried per
@@ -692,6 +698,7 @@ impl SessionRegistry {
             expect,
             tap: None,
             logon: None,
+            line_feeds: Default::default(),
         };
 
         self.insert_new_session(id_owned, active)?;
@@ -1033,6 +1040,14 @@ impl SessionRegistry {
         Ok(())
     }
 
+    /// The session's line feed count, when its pastes wait for the echo
+    /// (see `paste`).
+    pub(crate) fn paste_echo(&self, id: &str) -> Option<Arc<super::paste::LineFeeds>> {
+        let lock = self.sessions.lock().unwrap();
+        let session = lock.get(id)?;
+        session.transport.paste_waits_for_echo().then(|| session.line_feeds.clone())
+    }
+
     /// Sends a copy of the session's output to a script from now on, or
     /// stops when `tap` is None.
     pub fn set_output_tap(&self, id: &str, tap: Option<std::sync::mpsc::SyncSender<Vec<u8>>>) -> Result<()> {
@@ -1174,6 +1189,7 @@ mod logon_tests {
             expect: None,
             tap: None,
             logon: None,
+            line_feeds: Default::default(),
         }
     }
 

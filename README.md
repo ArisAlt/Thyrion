@@ -49,8 +49,8 @@ that is already open. Set GNS3's console command to
 - **Reach hosts behind a gateway.** Connect through a jump host / bastion with
   one setting.
 - **Work with network gear.** Serial console sessions with USB adapter
-  detection and Send Break, and slow line-by-line paste for devices that drop
-  characters.
+  detection and Send Break. A paste on a serial line goes line by line, each
+  line once the device has echoed the last, so a slow console keeps up.
 - **Use it as GNS3's console.** Set GNS3's custom console command to
   `thyrion --telnet {host} {port} --title "{name}"` and every device opens as
   a tab in one Thyrion window.
