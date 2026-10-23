@@ -7,7 +7,7 @@ import {
 import { 
   listSerialPorts, DetectedSerialPort, 
   vaultListEntriesMeta, vaultSetEntry, VaultEntryMeta, VaultEntry,
-  vaultIsInitialized, vaultIsUnlocked, vaultGetEntry,
+  vaultIsInitialized, vaultIsUnlocked, vaultGetEntry, vaultDelete,
   VAULT_CHANGED_EVENT,
 } from '../../services/tauriBridge';
 import { VaultUnlockDialog } from '../vault/VaultUnlockDialog';
@@ -509,26 +509,39 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
           };
           // A console may ask for no login, only an enable password: an
           // entry with just that is fine (the backend never sends an empty
-          // login password).
-          if (!entry.secret && !entry.enable_secret) {
+          // login password). An entry with neither is not.
+          const emptied = !entry.secret && !entry.enable_secret;
+          if (emptied && !(exists && removeEnable)) {
             setVaultSaveError('Enter the login password, the enable password or both to save in the vault.');
             setTab('credentials');
             return;
           }
-          // This failed silently when the vault was locked: the dialog
-          // closed, the session was linked to an entry that didn't exist,
-          // and the password was simply gone. Stay open and say why.
-          try {
-            await vaultSetEntry(entry);
-          } catch (err) {
-            const noVault = !(await vaultIsInitialized().catch(() => true));
-            setVaultSaveError(noVault
-              ? NO_VAULT_MESSAGE
-              : `The password wasn't saved: ${String(err)}. Unlock the vault (Vault in the top bar), then save again.`);
-            setTab('credentials');
-            return;
+          if (emptied) {
+            // Remove took the entry's only password. Saving it empty was
+            // refused, so the Remove could never be saved: drop the entry
+            // instead, or only this session's link when others use it.
+            if (vaultEntryUsers(finalKeyId).length === 0 && !(await vaultDelete(finalKeyId))) {
+              setVaultSaveError(`The enable password wasn't removed: vault entry "${finalKeyId}" couldn't be deleted. Unlock the vault (Vault in the top bar), then save again.`);
+              setTab('credentials');
+              return;
+            }
+            delete extra.PlinkyVaultKey;
+          } else {
+            // This failed silently when the vault was locked: the dialog
+            // closed, the session was linked to an entry that didn't exist,
+            // and the password was simply gone. Stay open and say why.
+            try {
+              await vaultSetEntry(entry);
+            } catch (err) {
+              const noVault = !(await vaultIsInitialized().catch(() => true));
+              setVaultSaveError(noVault
+                ? NO_VAULT_MESSAGE
+                : `The password wasn't saved: ${String(err)}. Unlock the vault (Vault in the top bar), then save again.`);
+              setTab('credentials');
+              return;
+            }
+            extra.PlinkyVaultKey = finalKeyId;
           }
-          extra.PlinkyVaultKey = finalKeyId;
         } else if (exists) {
           extra.PlinkyVaultKey = finalKeyId;
         } else {
@@ -593,10 +606,20 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
   // a blank password then keeps the stored one.
   const typedKey = vaultKeyId.trim();
   const keyIsSaved = !!typedKey && (typedKey === savedVaultKey || vaultEntries.some(v => v.id === typedKey));
+  // The other saved sessions that use vault entry `key`: linked to it, or
+  // its implicit owner ("session:<name>" with no link of its own).
+  const vaultEntryUsers = (key: string) => savedSessions
+    .filter(s => s.name !== editingSession?.name)
+    .filter(s => s.extra?.PlinkyVaultKey ? s.extra.PlinkyVaultKey === key : key === `session:${s.name}`)
+    .map(s => s.name);
   // The entry the enable password comes from, and whether it has one.
   const enableEntryKey = useVault ? (vaultMode === 'link' ? selectedVaultKey : typedKey) : '';
   const enableSaved = !!enableEntryKey && !!vaultEntries.find(v => v.id === enableEntryKey)?.has_enable_secret;
   const hasEnable = !!vaultEnablePassword || (enableSaved && !removeEnable);
+  // Removing the enable password from an entry that has nothing else
+  // leaves it empty: saving then deletes it, or unlinks a shared one.
+  const enableOnly = enableSaved && vaultEntries.find(v => v.id === enableEntryKey)?.has_login_secret === false && !vaultPassword;
+  const enableEntryShared = enableOnly ? vaultEntryUsers(enableEntryKey) : [];
   const enableEditable = !useVault || vaultMode === 'new';
 
   // The tabs this protocol has. A dot marks one holding non-default settings.
@@ -1130,7 +1153,13 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
                     </div>
                     {removeEnable && (
                       <p role="status" className="flex items-center gap-2 text-amber-300">
-                        <span>The enable password is removed from the vault when you save.</span>
+                        <span>
+                          {!enableOnly
+                            ? 'The enable password is removed from the vault when you save.'
+                            : enableEntryShared.length === 0
+                              ? 'It is this entry\'s only password, so saving deletes the vault entry and unlinks this session.'
+                              : `It is this entry's only password and ${enableEntryShared.join(', ')} also ${enableEntryShared.length === 1 ? 'uses' : 'use'} it, so saving only unlinks this session.`}
+                        </span>
                         <button type="button" onClick={() => setRemoveEnable(false)} className="underline hover:text-amber-200">Keep it</button>
                       </p>
                     )}

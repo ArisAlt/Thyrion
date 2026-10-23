@@ -1148,6 +1148,8 @@ export interface VaultEntryMeta {
   id: string;
   username?: string;
   has_enable_secret?: boolean;
+  /** False for an entry with only an enable password. */
+  has_login_secret?: boolean;
   notes?: string;
   created_at: number;
   updated_at: number;

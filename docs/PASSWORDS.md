@@ -79,6 +79,8 @@ Set it in **Session Settings → Credentials & Vault → Privileged mode
 (enable)**, or in the Vault screen. An entry may hold only an enable
 password, for a console that asks for no login; Thyrion then never sends an
 empty login password.
+Removing the only password an entry has deletes the entry when you save. If
+other sessions use that entry, only this session is unlinked from it.
 
 - **Sent by itself** only with "Send it when the device asks" on for the
   session, and only when **you** have just typed `enable` (or `en`, `super`)

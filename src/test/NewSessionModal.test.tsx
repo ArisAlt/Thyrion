@@ -11,6 +11,7 @@ const mockVaultIsInitialized = vi.fn().mockResolvedValue(true);
 const mockVaultIsUnlocked = vi.fn().mockResolvedValue(true);
 const mockVaultGetEntry = vi.fn().mockResolvedValue(null);
 const mockVaultUnlock = vi.fn().mockResolvedValue(true);
+const mockVaultDelete = vi.fn().mockResolvedValue(true);
 
 vi.mock('../services/tauriBridge', () => ({
   VAULT_CHANGED_EVENT: 'plinky:vault-changed',
@@ -41,6 +42,7 @@ vi.mock('../services/tauriBridge', () => ({
   vaultIsUnlocked: (...args: any[]) => mockVaultIsUnlocked(...args),
   vaultGetEntry: (...args: any[]) => mockVaultGetEntry(...args),
   vaultUnlock: (...args: any[]) => mockVaultUnlock(...args),
+  vaultDelete: (...args: any[]) => mockVaultDelete(...args),
 }));
 
 describe('NewSessionModal Component', () => {
@@ -1035,5 +1037,82 @@ describe('the enable password has its own place in the session settings', () => 
     render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={vi.fn()} editingSession={savedWithVault} initialTab="credentials" />);
     expect(screen.getByRole('tab', { name: /Credentials & Vault/i }).getAttribute('aria-selected')).toBe('true');
     expect(screen.getByLabelText(/^Enable password$/)).toBeDefined();
+  });
+});
+
+describe('removing the only password of an enable-only entry', () => {
+  // A console with no login: its entry holds only the enable password.
+  const console1 = {
+    name: 'R9 console', hostname: '192.0.2.9', port: 23, protocol: 'Telnet',
+    extra: { PlinkyVaultKey: 'session:R9 console' },
+  } as any;
+  const stored = { id: 'session:R9 console', secret: '', enable_secret: 'en4ble', created_at: 5, updated_at: 5 };
+
+  beforeEach(() => {
+    mockVaultIsInitialized.mockResolvedValue(true);
+    mockVaultIsUnlocked.mockResolvedValue(true);
+    mockVaultSetEntry.mockClear();
+    mockVaultDelete.mockClear().mockResolvedValue(true);
+    mockVaultListEntriesMeta.mockResolvedValue([
+      { id: 'session:R9 console', has_enable_secret: true, has_login_secret: false },
+    ]);
+    mockVaultGetEntry.mockResolvedValue({ ...stored });
+  });
+
+  const removeAndSave = async (others: any[] = []) => {
+    const onSave = vi.fn();
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} editingSession={console1} savedSessions={[console1, ...others]} />);
+    fireEvent.click(screen.getByRole('tab', { name: /Credentials & Vault/i }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove' }));
+    const note = screen.getByRole('status').textContent;
+    fireEvent.click(screen.getByRole('button', { name: /^save changes$/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    return { note, saved: onSave.mock.calls[0][0] };
+  };
+
+  it("deletes the session's own entry and unlinks the session", async () => {
+    // Saving it empty was refused ("Enter the login password..."), so the
+    // Remove could never be saved.
+    const { note, saved } = await removeAndSave();
+    expect(note).toMatch(/only password, so saving deletes the vault entry/);
+    expect(mockVaultDelete).toHaveBeenCalledWith('session:R9 console');
+    expect(mockVaultSetEntry).not.toHaveBeenCalled();
+    expect(saved.extra.PlinkyVaultKey).toBeUndefined();
+    expect(screen.queryByText(/Enter the login password/)).toBeNull();
+  });
+
+  it('only unlinks the session when another session uses the entry', async () => {
+    const other = { name: 'R9 backup', hostname: '192.0.2.10', port: 23, protocol: 'Telnet', extra: { PlinkyVaultKey: 'session:R9 console' } };
+    const { note, saved } = await removeAndSave([other]);
+    expect(note).toMatch(/R9 backup also uses it, so saving only unlinks this session/);
+    expect(mockVaultDelete).not.toHaveBeenCalled();
+    expect(mockVaultSetEntry).not.toHaveBeenCalled();
+    expect(saved.extra.PlinkyVaultKey).toBeUndefined();
+  });
+
+  it('keeps the dialog open when the entry cannot be deleted', async () => {
+    mockVaultDelete.mockResolvedValue(false);
+    const onSave = vi.fn();
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} editingSession={console1} savedSessions={[console1]} />);
+    fireEvent.click(screen.getByRole('tab', { name: /Credentials & Vault/i }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove' }));
+    fireEvent.click(screen.getByRole('button', { name: /^save changes$/i }));
+    expect(await screen.findByText(/couldn't be deleted/)).toBeDefined();
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it('a new login password typed with Remove keeps the entry, without the enable password', async () => {
+    const onSave = vi.fn();
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} editingSession={console1} savedSessions={[console1]} />);
+    fireEvent.click(screen.getByRole('tab', { name: /Credentials & Vault/i }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove' }));
+    fireEvent.change(screen.getByLabelText(/Login Password/), { target: { value: 'l0gin' } });
+    expect(screen.getByRole('status').textContent).toMatch(/removed from the vault when you save/);
+    fireEvent.click(screen.getByRole('button', { name: /^save changes$/i }));
+    await waitFor(() => expect(mockVaultSetEntry).toHaveBeenCalled());
+    expect(mockVaultSetEntry.mock.calls[0][0]).toMatchObject({ secret: 'l0gin', enable_secret: undefined });
+    expect(mockVaultDelete).not.toHaveBeenCalled();
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave.mock.calls[0][0].extra.PlinkyVaultKey).toBe('session:R9 console');
   });
 });

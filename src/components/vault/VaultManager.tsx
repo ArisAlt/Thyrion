@@ -69,6 +69,8 @@ export const VaultManager: React.FC<VaultManagerProps> = ({ onClose }) => {
   const [newSecret, setNewSecret] = useState('');
   // Editing an entry that has an enable password, and "Remove" pressed on it.
   const [editingHasEnable, setEditingHasEnable] = useState(false);
+  // False for an entry with only an enable password: removing that empties it.
+  const [editingHasLogin, setEditingHasLogin] = useState(true);
   const [removeEnable, setRemoveEnable] = useState(false);
   const [newEnableSecret, setNewEnableSecret] = useState('');
   const [newNotes, setNewNotes] = useState('');
@@ -223,6 +225,7 @@ export const VaultManager: React.FC<VaultManagerProps> = ({ onClose }) => {
     setNewUsername('');
     setNewSecret('');
     setEditingHasEnable(false);
+    setEditingHasLogin(true);
     setRemoveEnable(false);
     setNewEnableSecret('');
     setNewNotes('');
@@ -236,6 +239,7 @@ export const VaultManager: React.FC<VaultManagerProps> = ({ onClose }) => {
     setNewUsername(entry.username || '');
     setNewSecret('');
     setEditingHasEnable(!!entry.has_enable_secret);
+    setEditingHasLogin(entry.has_login_secret !== false);
     setRemoveEnable(false);
     setNewEnableSecret('');
     setNewNotes(entry.notes || '');
@@ -286,6 +290,18 @@ export const VaultManager: React.FC<VaultManagerProps> = ({ onClose }) => {
         created_at: now,
         updated_at: now,
       };
+    }
+
+    // Remove took the entry's only password: delete the entry rather than
+    // keep one with no password at all.
+    if (editingId && !entry.secret && !entry.enable_secret) {
+      if (!(await vaultDelete(editingId))) {
+        setError(`Credential '${editingId}' couldn't be deleted`);
+        return;
+      }
+      resetForm();
+      await loadEntries();
+      return;
     }
 
     try {
@@ -685,7 +701,9 @@ export const VaultManager: React.FC<VaultManagerProps> = ({ onClose }) => {
                   </div>
                   {removeEnable && (
                     <p role="status" className="text-meta text-amber-300">
-                      The enable password is removed when you save.{' '}
+                      {editingHasLogin || newSecret
+                        ? 'The enable password is removed when you save.'
+                        : 'It is this entry\'s only password, so saving deletes the entry. Sessions that use it will ask for a password again.'}{' '}
                       <button type="button" onClick={() => setRemoveEnable(false)} className="underline hover:text-amber-200">Keep it</button>
                     </p>
                   )}
