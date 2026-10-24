@@ -109,6 +109,32 @@ nothing anywhere else unless you ask it to.
 
 ---
 
+## Known bugs
+
+Found and confirmed, not fixed yet:
+
+- **Telnet or raw to an IPv6 address in brackets fails.** A saved telnet or
+  raw session whose host is `[2001:db8::1]` reports "Host does not exist".
+  Write the address without the brackets: `2001:db8::1`.
+- **Tunnels with an IPv6 destination are misread.** In the Tunnels panel, a
+  port forward to `[::1]:8080` shows the wrong host and port, and so does a
+  forward with a listening address (`127.0.0.1:8080=…`) or PuTTY's `4`/`6`
+  prefix. They still work when the session connects; edit them in PuTTY.
+- **Switching a tunnel off deletes it.** PuTTY's session has no "off" for a
+  port forward, so a forward switched off in the Tunnels panel is gone after
+  a restart. Add it again to turn it back on.
+- **A script can outlive its tab.** A script that isn't reading from or
+  typing into its session when the tab closes, or when Thyrion quits (for
+  example one in a `sleep`), keeps running until it next uses the session.
+  A script waiting on the session ends at once. Press Stop before closing.
+- **SFTP: a name ending in spaces loses them.** Such a file is listed without
+  its trailing spaces, and downloading or deleting it fails.
+- **A PuTTY version Thyrion can't read shows as missing.** With a `plink`
+  whose version isn't in the usual form (a development snapshot), the title
+  bar says PuTTY is missing, although sessions work.
+
+---
+
 ## Reporting problems
 
 Bugs and ideas: [open an issue](https://github.com/ArisAlt/Thyrion/issues/new/choose).
