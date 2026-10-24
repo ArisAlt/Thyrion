@@ -51,6 +51,10 @@ that is already open. Set GNS3's console command to
 - **Work with network gear.** Serial console sessions with USB adapter
   detection and Send Break. A paste on a serial line goes line by line, each
   line once the device has echoed the last, so a slow console keeps up.
+- **Copy and paste with the mouse, like PuTTY.** Selecting text copies it, a
+  middle click (the scroll wheel) pastes, and a right click opens the menu or
+  pastes, as you choose. A paste of several lines shows you the text first.
+  All of it is in Settings > Mouse & Clipboard.
 - **Use it as GNS3's console.** Set GNS3's custom console command to
   `thyrion --telnet {host} {port} --title "{name}"` and every device opens as
   a tab in one Thyrion window.

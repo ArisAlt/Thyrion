@@ -4,6 +4,7 @@ import '@testing-library/jest-dom';
 import { SettingsModal } from '../components/modals/SettingsModal';
 import { vaultDestroy, vaultIsInitialized, setLoggingSettings } from '../services/tauriBridge';
 import { version } from '../../package.json';
+import { getMiddleClickPaste } from '../services/middleClickPaste';
 
 // Mock tauriBridge detectPutty
 vi.mock('../services/tauriBridge', () => ({
@@ -67,6 +68,7 @@ describe('SettingsModal Component', () => {
     expect(onChangeCursor).toHaveBeenCalledWith('underline');
 
     // Click Reset Layout
+    fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
     const resetBtn = screen.getByRole('button', { name: /reset layout/i });
     fireEvent.click(resetBtn);
     expect(onReset).toHaveBeenCalled();
@@ -88,6 +90,7 @@ describe('SettingsModal Component', () => {
     );
     const destroy = vi.mocked(vaultDestroy);
     const openDelete = async () => {
+      fireEvent.click(screen.getByRole('tab', { name: 'Vault' }));
       const btn = await screen.findByRole('button', { name: /^Delete Vault$/ });
       await waitFor(() => expect((btn as HTMLButtonElement).disabled).toBe(false));
       fireEvent.click(btn);
@@ -126,6 +129,7 @@ describe('SettingsModal Component', () => {
     it('offers nothing to delete when there is no vault', async () => {
       vi.mocked(vaultIsInitialized).mockResolvedValueOnce(false);
       renderSettings();
+      fireEvent.click(screen.getByRole('tab', { name: 'Vault' }));
       const btn = await screen.findByRole('button', { name: /^Delete Vault$/ });
       await waitFor(() => expect(vi.mocked(vaultIsInitialized)).toHaveBeenCalled());
       expect((btn as HTMLButtonElement).disabled).toBe(true);
@@ -187,6 +191,89 @@ describe('SettingsModal Component', () => {
       await waitFor(() => expect(setLoggingSettings).toHaveBeenCalledWith(false, '/srv/logs', 'printable'));
       fireEvent.click(await screen.findByText('Default'));
       await waitFor(() => expect(setLoggingSettings).toHaveBeenLastCalledWith(false, null, 'printable'));
+    });
+  });
+
+  describe('Tabs', () => {
+    // One long page hid its options: the owner looked for middle-click
+    // paste and copy on select and couldn't find them.
+    const renderSettings = () => render(
+      <SettingsModal
+        isOpen={true}
+        onClose={vi.fn()}
+        fontFamily="monospace"
+        onChangeFontFamily={vi.fn()}
+        fontSize={13}
+        onChangeFontSize={vi.fn()}
+        cursorStyle="block"
+        onChangeCursorStyle={vi.fn()}
+        onResetLayout={vi.fn()}
+      />
+    );
+
+    it('lists the categories down the side, Terminal first', () => {
+      renderSettings();
+      const tabs = screen.getAllByRole('tab').map(t => t.textContent);
+      expect(tabs).toEqual(['Terminal', 'Mouse & Clipboard', 'Appearance', 'Logging', 'Vault', 'Advanced', 'About']);
+      expect(screen.getByRole('tablist')).toHaveAttribute('aria-orientation', 'vertical');
+      expect(screen.getByRole('tab', { name: 'Terminal' })).toHaveAttribute('aria-selected', 'true');
+      expect(screen.getByRole('tabpanel')).toHaveAttribute('aria-labelledby', 'settings-tab-terminal');
+      expect(screen.getByLabelText('Scrollback')).toBeVisible();
+    });
+
+    it('shows one tab at a time, keeping every option in the page', () => {
+      renderSettings();
+      fireEvent.click(screen.getByRole('tab', { name: 'Mouse & Clipboard' }));
+      expect(screen.getByRole('tabpanel')).toHaveAttribute('id', 'settings-panel-mouse');
+      expect(document.getElementById('settings-copy-on-select')).toBeVisible();
+      expect(document.getElementById('settings-middle-click-paste')).toBeVisible();
+      expect(screen.getByRole('button', { name: /Paste Clipboard \(PuTTY\)/ })).toBeVisible();
+      expect(screen.getByRole('button', { name: /Multi-line pastes/ })).toBeVisible();
+      // The other tabs' options are still there (e2e finds them by id), only hidden.
+      expect(document.getElementById('settings-scrollback')).not.toBeVisible();
+      expect(document.getElementById('settings-terminal-scheme')).not.toBeVisible();
+      fireEvent.click(screen.getByRole('tab', { name: 'Appearance' }));
+      expect(document.getElementById('settings-terminal-scheme')).toBeVisible();
+      expect(screen.getByRole('radiogroup', { name: 'Interface theme' })).toBeVisible();
+    });
+
+    it('moves between tabs with the arrow keys, Home and End', () => {
+      renderSettings();
+      const tab = (name: string) => screen.getByRole('tab', { name });
+      tab('Terminal').focus();
+      fireEvent.keyDown(tab('Terminal'), { key: 'ArrowDown' });
+      expect(tab('Mouse & Clipboard')).toHaveAttribute('aria-selected', 'true');
+      expect(tab('Mouse & Clipboard')).toHaveFocus();
+      expect(tab('Mouse & Clipboard')).toHaveAttribute('tabindex', '0');
+      expect(tab('Terminal')).toHaveAttribute('tabindex', '-1');
+      fireEvent.keyDown(tab('Mouse & Clipboard'), { key: 'ArrowUp' });
+      expect(tab('Terminal')).toHaveFocus();
+      fireEvent.keyDown(tab('Terminal'), { key: 'ArrowUp' });
+      expect(tab('About')).toHaveAttribute('aria-selected', 'true');
+      fireEvent.keyDown(tab('About'), { key: 'ArrowDown' });
+      expect(tab('Terminal')).toHaveAttribute('aria-selected', 'true');
+      fireEvent.keyDown(tab('Terminal'), { key: 'End' });
+      expect(tab('About')).toHaveFocus();
+      fireEvent.keyDown(tab('About'), { key: 'Home' });
+      expect(tab('Terminal')).toHaveFocus();
+    });
+
+    it('middle-click paste is on by default, and turning it off is remembered', () => {
+      localStorage.removeItem('plinky_middle_click_paste');
+      const { unmount } = renderSettings();
+      fireEvent.click(screen.getByRole('tab', { name: 'Mouse & Clipboard' }));
+      const box = screen.getByLabelText(/Middle-click pastes/) as HTMLInputElement;
+      expect(box.checked).toBe(true);
+      expect(box.closest('label')!.textContent).toMatch(/pastes the clipboard/);
+      fireEvent.click(box);
+      expect(box.checked).toBe(false);
+      expect(localStorage.getItem('plinky_middle_click_paste')).toBe('false');
+      expect(getMiddleClickPaste()).toBe(false);
+      unmount();
+      renderSettings();
+      fireEvent.click(screen.getByRole('tab', { name: 'Mouse & Clipboard' }));
+      expect((screen.getByLabelText(/Middle-click pastes/) as HTMLInputElement).checked).toBe(false);
+      localStorage.removeItem('plinky_middle_click_paste');
     });
   });
 });

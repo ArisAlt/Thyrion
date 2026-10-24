@@ -279,6 +279,7 @@ export const tests = [
     }, [text], { what: `"${text}"` });
     const setRightClick = async (choice) => {
       await app.run((e) => e.click(document.querySelector('[aria-label="Settings"]')));
+      await app.run((e) => e.click(document.getElementById('settings-tab-mouse')));
       await clickText(choice);
       await app.run((e) => e.click(document.querySelector('[aria-label="Close settings"]')));
       await app.waitFor(() => !document.querySelector('[aria-label="Close settings"]'), [], { what: 'Settings to close' });
@@ -301,6 +302,63 @@ export const tests = [
     } finally {
       await app.key('Ctrl+C');
       await setRightClick('Context Menu');
+    }
+  }],
+
+  ['a middle click pastes the clipboard once, like PuTTY', async ({ app, r1 }) => {
+    // On by default (Settings, Mouse & Clipboard). The page's own handler
+    // pastes; a scripted click cannot reach the webview's native X
+    // selection paste, which the handler stops from pasting a second time.
+    const middleClick = (shiftKey = false) => app.run((e, shift) => {
+      const el = [...document.querySelectorAll('.xterm')].find(e.visible).querySelector('.xterm-screen');
+      const r = el.getBoundingClientRect();
+      const at = { bubbles: true, cancelable: true, view: window, button: 1, shiftKey: shift, clientX: r.left + 40, clientY: r.top + 20 };
+      el.dispatchEvent(new MouseEvent('mousedown', { ...at, buttons: 4 }));
+      el.dispatchEvent(new MouseEvent('mouseup', { ...at, buttons: 0 }));
+      el.dispatchEvent(new MouseEvent('auxclick', { ...at, buttons: 0 }));
+      return true;
+    }, shiftKey);
+    const setMiddleClick = async (on) => {
+      await app.run((e) => e.click(document.querySelector('[aria-label="Settings"]')));
+      await app.run((e) => e.click(document.getElementById('settings-tab-mouse')));
+      const { now } = await app.waitFor((e) => {
+        const box = document.getElementById('settings-middle-click-paste');
+        return box && e.visible(box) ? { now: box.checked } : null;
+      }, [], { what: 'the Middle-click pastes setting' });
+      if (now !== on) await app.run((e) => e.click(document.getElementById('settings-middle-click-paste')));
+      await app.run((e) => e.click(document.querySelector('[aria-label="Close settings"]')));
+      await app.waitFor(() => !document.querySelector('[aria-label="Close settings"]'), [], { what: 'Settings to close' });
+      return now;
+    };
+
+    await setClipboard(app, 'show users');
+    r1.clear();
+    await middleClick();
+    await r1.waitForBytes('show users', { timeoutMs: 2000 });
+    await sleep(500);
+    assert.equal(r1.text(), 'show users', 'pasted once, and nothing else');
+    await app.key('Ctrl+C');
+
+    // Several lines go through the paste window, as with the paste keys.
+    await setClipboard(app, 'show clock\nshow users\n');
+    r1.clear();
+    await middleClick();
+    await app.waitFor(() => !!document.querySelector('[aria-labelledby="paste-title"]'), [], { what: 'the paste window' });
+    await app.key('Escape');
+    await app.waitFor(() => !document.querySelector('[aria-labelledby="paste-title"]'), [], { what: 'the paste window to close' });
+    await sleep(300);
+    assert.equal(r1.received.length, 0, 'nothing sent once the paste window is cancelled');
+
+    // Off: the click is the webview's again, and the page pastes nothing.
+    assert.equal(await setMiddleClick(false), true, 'on by default');
+    try {
+      await setClipboard(app, 'show arp');
+      r1.clear();
+      await middleClick();
+      await sleep(500);
+      assert.equal(r1.received.length, 0, `nothing pasted with the setting off, got ${JSON.stringify(r1.text())}`);
+    } finally {
+      await setMiddleClick(true);
     }
   }],
 
@@ -516,7 +574,8 @@ export const tests = [
   ['a longer scrollback from Settings keeps a long listing whole for Select All and copy', async ({ app, r1 }) => {
     // xterm's fixed 1,000 lines cut a long show tech-support off at the top.
     await app.run((e) => e.click(document.querySelector('[aria-label="Settings"]')));
-    await app.waitFor(() => !!document.getElementById('settings-scrollback'), [], { what: 'the Scrollback setting' });
+    await app.run((e) => e.click(document.getElementById('settings-tab-terminal')));
+    await app.waitFor((e) => e.visible(document.getElementById('settings-scrollback')), [], { what: 'the Scrollback setting' });
     await app.run(() => {
       const s = document.getElementById('settings-scrollback');
       Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(s, '5000');

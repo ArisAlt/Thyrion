@@ -13,7 +13,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 // A stand-in xterm that keeps its key handler and records pastes.
-const term = vi.hoisted(() => ({ keyHandler: null as null | ((e: KeyboardEvent) => boolean), pasted: [] as string[], input: [] as string[] }));
+const term = vi.hoisted(() => ({ keyHandler: null as null | ((e: KeyboardEvent) => boolean), pasted: [] as string[], input: [] as string[], modes: { mouseTrackingMode: 'none' } }));
 function stand(): any {
   const fn: any = () => stand();
   return new Proxy(fn, {
@@ -25,6 +25,7 @@ function stand(): any {
       if (p === 'paste') return (t: string) => { term.pasted.push(t); };
       if (p === 'input') return (t: string) => { term.input.push(t); };
       if (p === 'getSelection') return () => 'selected text';
+      if (p === 'modes') return term.modes;
       if (p === Symbol.toPrimitive) return () => 0;
       if (p === 'then') return undefined;
       return stand();
@@ -48,6 +49,7 @@ vi.mock('../services/tauriBridge', async (orig) => ({
 }));
 
 import { readClipboard, writeClipboard } from '../services/clipboard';
+import { setMiddleClickPaste } from '../services/middleClickPaste';
 import { TerminalView } from '../components/terminal/TerminalView';
 import type { TerminalTab } from '../types/session';
 
@@ -71,7 +73,12 @@ describe('the clipboard in the desktop app', () => {
 });
 
 describe('pasting into a terminal', () => {
-  beforeEach(() => { env.invoked = []; env.clip = ''; env.tauri = true; term.keyHandler = null; term.pasted = []; term.input = []; });
+  beforeEach(() => {
+    env.invoked = []; env.clip = ''; env.tauri = true; term.keyHandler = null; term.pasted = []; term.input = [];
+    term.modes.mouseTrackingMode = 'none';
+    localStorage.removeItem('plinky_middle_click_paste');
+    localStorage.removeItem('plinky_paste_confirm');
+  });
 
   const tab: TerminalTab = {
     id: 'tab-paste', title: 'R1', sessionName: 'R1', syncChannel: 'none', status: 'live',
@@ -115,5 +122,91 @@ describe('pasting into a terminal', () => {
     expect(term.keyHandler!(key('Digit6', { ctrlKey: true, shiftKey: true, key: '^' }))).toBe(false);
     expect(term.keyHandler!(key('Home', { key: 'Home' }))).toBe(false);
     expect(term.input).toEqual(['\x1e', '\x1b[1~']);
+  });
+
+  describe('a middle click', () => {
+    // PuTTY pastes on a middle click (the scroll wheel). WebKitGTK pasted
+    // the X selection by itself, past the paste window and serial pacing,
+    // and WebView2 did nothing.
+    const renderTerminal = async () => {
+      const { container } = await act(async () => render(<TerminalView tab={tab} onUpdateTab={() => {}} />));
+      // Where xterm draws: the stand-in xterm draws nothing.
+      const box = container.querySelector('.flex-1.w-full.h-full.overflow-hidden')!;
+      const screenEl = document.createElement('div');
+      screenEl.className = 'xterm';
+      box.appendChild(screenEl);
+      return screenEl;
+    };
+    const middleClick = async (el: Element, init: MouseEventInit = {}) => {
+      const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 1, buttons: 4, ...init });
+      const up = new MouseEvent('mouseup', { bubbles: true, cancelable: true, button: 1, ...init });
+      await act(async () => { el.dispatchEvent(down); el.dispatchEvent(up); });
+      await act(async () => { await new Promise(r => setTimeout(r, 10)); });
+      return { down, up };
+    };
+    // The paste the webview performs itself after a middle click.
+    const nativePaste = (el: Element, text: string) => {
+      const ev = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
+      Object.defineProperty(ev, 'clipboardData', { value: { getData: () => text } });
+      el.dispatchEvent(ev);
+      return ev;
+    };
+
+    it('pastes the clipboard once, through the paste path', async () => {
+      env.clip = 'show version';
+      const el = await renderTerminal();
+      const { down, up } = await middleClick(el);
+      expect(env.invoked.map(i => i.cmd)).toContain('read_clipboard_text');
+      expect(term.pasted).toEqual(['show version']);
+      expect(down.defaultPrevented).toBe(true);
+      expect(up.defaultPrevented).toBe(true);
+      // The webview's own paste right after it is dropped, not sent twice.
+      const native = nativePaste(el, 'show version');
+      expect(native.defaultPrevented).toBe(true);
+      expect(term.pasted).toEqual(['show version']);
+    });
+
+    it('opens the paste window for several lines, as the paste keys do', async () => {
+      env.clip = 'interface Gi0/1\n shutdown\n';
+      const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+      const el = await renderTerminal();
+      await middleClick(el);
+      expect(confirm).toHaveBeenCalledTimes(1);
+      expect(term.pasted).toEqual([]);
+      confirm.mockReturnValue(true);
+      await middleClick(el);
+      expect(term.pasted).toEqual(['interface Gi0/1\n shutdown\n']);
+      confirm.mockRestore();
+    });
+
+    it('is left to the webview when the setting is off', async () => {
+      setMiddleClickPaste(false);
+      env.clip = 'show version';
+      const el = await renderTerminal();
+      const { down } = await middleClick(el);
+      expect(down.defaultPrevented).toBe(false);
+      expect(env.invoked.map(i => i.cmd)).not.toContain('read_clipboard_text');
+      expect(term.pasted).toEqual([]);
+      // Its own paste goes through as before.
+      expect(nativePaste(el, 'show clock').defaultPrevented).toBe(false);
+    });
+
+    it('goes to a program that uses the mouse, unless Shift is held', async () => {
+      env.clip = 'show version';
+      term.modes.mouseTrackingMode = 'vt200';
+      const el = await renderTerminal();
+      const { down } = await middleClick(el);
+      expect(down.defaultPrevented).toBe(false);
+      expect(term.pasted).toEqual([]);
+      await middleClick(el, { shiftKey: true });
+      expect(term.pasted).toEqual(['show version']);
+    });
+
+    it('a left click pastes nothing', async () => {
+      env.clip = 'show version';
+      const el = await renderTerminal();
+      await middleClick(el, { button: 0, buttons: 1 });
+      expect(term.pasted).toEqual([]);
+    });
   });
 });

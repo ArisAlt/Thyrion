@@ -128,7 +128,8 @@ export const tests = [
 
     // A different default in Settings does not change this session.
     await app.run((e) => e.click(document.querySelector('[aria-label="Settings"]')));
-    await app.waitFor(() => !!document.getElementById('settings-terminal-scheme'), [], { what: 'Settings' });
+    await app.run((e) => e.click(document.getElementById('settings-tab-appearance')));
+    await app.waitFor((e) => e.visible(document.getElementById('settings-terminal-scheme')), [], { what: 'Settings, Appearance' });
     assert.ok(await pick('settings-terminal-scheme', 'putty'));
     await app.run((e) => e.click(document.querySelector('[aria-label="Close settings"]')));
     await sleep(400);
