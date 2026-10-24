@@ -11,6 +11,7 @@ const mockVaultIsInitialized = vi.fn().mockResolvedValue(true);
 const mockVaultIsUnlocked = vi.fn().mockResolvedValue(true);
 const mockVaultGetEntry = vi.fn().mockResolvedValue(null);
 const mockVaultUnlock = vi.fn().mockResolvedValue(true);
+const mockVaultCreate = vi.fn().mockResolvedValue(true);
 const mockVaultDelete = vi.fn().mockResolvedValue(true);
 
 vi.mock('../services/tauriBridge', () => ({
@@ -42,6 +43,7 @@ vi.mock('../services/tauriBridge', () => ({
   vaultIsUnlocked: (...args: any[]) => mockVaultIsUnlocked(...args),
   vaultGetEntry: (...args: any[]) => mockVaultGetEntry(...args),
   vaultUnlock: (...args: any[]) => mockVaultUnlock(...args),
+  vaultCreate: (...args: any[]) => mockVaultCreate(...args),
   vaultDelete: (...args: any[]) => mockVaultDelete(...args),
 }));
 
@@ -702,25 +704,61 @@ describe('saving a password when there is no vault yet', () => {
     fireEvent.click(screen.getByLabelText(/Save credentials in Encrypted Vault/i));
   };
 
-  it('says to create a vault first, up front and on save, and saves nothing', async () => {
+  it('says there is no vault up front, and Save offers to create one there', async () => {
     // First run: the user ticked the box, typed a password, pressed Save --
-    // and got "Vault is locked ... unlock the vault" for a vault that didn't exist.
+    // and got "Vault is locked ... unlock the vault" for a vault that didn't
+    // exist; later, "create one first" in the top bar, which lost the dialog.
     mockVaultIsInitialized.mockResolvedValue(false);
     mockVaultIsUnlocked.mockResolvedValue(false);
     mockVaultSetEntry.mockClear();
+    mockVaultCreate.mockClear();
     const onSave = vi.fn();
     render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} />);
     fillSession();
-    expect((await screen.findByRole('status')).textContent).toMatch(/No vault yet\. Create one first/);
+    expect((await screen.findByRole('status')).textContent).toMatch(/No vault yet/);
 
     fireEvent.change(screen.getByPlaceholderText('Session login password...'), { target: { value: 's3cret' } });
     fireEvent.click(screen.getByRole('tab', { name: 'General' }));
     fireEvent.click(screen.getByRole('button', { name: /^save session$/i }));
 
-    expect((await screen.findByRole('alert')).textContent).toMatch(/There is no vault yet/);
+    const dialog = await screen.findByRole('dialog', { name: 'Create the vault' });
+    expect(dialog.textContent).toMatch(/never stored/);
     expect(onSave).not.toHaveBeenCalled();
-    expect(mockVaultSetEntry).not.toHaveBeenCalled();
-    expect(screen.getByRole('tab', { name: /Credentials & Vault/i }).getAttribute('aria-selected')).toBe('true');
+    fireEvent.change(screen.getByLabelText('New master password'), { target: { value: 'short' } });
+    fireEvent.change(screen.getByLabelText('Confirm master password'), { target: { value: 'short' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+    expect((await screen.findByRole('alert')).textContent).toMatch(/at least 8/);
+    fireEvent.change(screen.getByLabelText('New master password'), { target: { value: 'm4ster-pass' } });
+    fireEvent.change(screen.getByLabelText('Confirm master password'), { target: { value: 'm4ster-pas' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+    expect((await screen.findByRole('alert')).textContent).toMatch(/not the same/);
+    expect(mockVaultCreate).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText('Confirm master password'), { target: { value: 'm4ster-pass' } });
+    mockVaultIsInitialized.mockResolvedValue(true);
+    mockVaultIsUnlocked.mockResolvedValue(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+    await waitFor(() => expect(mockVaultCreate).toHaveBeenCalledWith('m4ster-pass'));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(mockVaultSetEntry).toHaveBeenCalledWith(expect.objectContaining({ id: 'session:core-sw1', secret: 's3cret' }));
+    expect(onSave.mock.calls[0][0].extra.PlinkyVaultKey).toBe('session:core-sw1');
+  });
+
+  it('"Create vault…" on Credentials creates one without leaving the dialog', async () => {
+    mockVaultIsInitialized.mockResolvedValue(false);
+    mockVaultIsUnlocked.mockResolvedValue(false);
+    mockVaultCreate.mockClear();
+    const onSave = vi.fn();
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} />);
+    fillSession();
+    fireEvent.click(await screen.findByRole('button', { name: 'Create vault…' }));
+    fireEvent.change(screen.getByLabelText('New master password'), { target: { value: 'm4ster-pass' } });
+    fireEvent.change(screen.getByLabelText('Confirm master password'), { target: { value: 'm4ster-pass' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+    await waitFor(() => expect(mockVaultCreate).toHaveBeenCalledWith('m4ster-pass'));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Create the vault' })).toBeNull());
+    expect(screen.queryByText(/No vault yet/)).toBeNull();
+    expect(onSave).not.toHaveBeenCalled();
   });
 
   it('says to unlock a vault that exists but is locked', async () => {
@@ -1134,5 +1172,127 @@ describe('removing the only password of an enable-only entry', () => {
     expect(mockVaultDelete).not.toHaveBeenCalled();
     await waitFor(() => expect(onSave).toHaveBeenCalled());
     expect(onSave.mock.calls[0][0].extra.PlinkyVaultKey).toBe('session:R9 console');
+  });
+});
+
+describe('saving with the vault locked (or not there yet), without unlocking it', () => {
+  const savedLinked = {
+    name: 'core-rtr',
+    hostname: '192.0.2.1',
+    port: 22,
+    protocol: 'SSH' as const,
+    username: 'admin',
+    extra: { PlinkyVaultKey: 'session:core-rtr' },
+  };
+
+  beforeEach(() => {
+    mockVaultIsInitialized.mockResolvedValue(true);
+    mockVaultIsUnlocked.mockResolvedValue(false);
+    mockVaultSetEntry.mockClear();
+    mockVaultUnlock.mockClear();
+  });
+
+  const newSessionWithPassword = async () => {
+    const onSave = vi.fn();
+    const onClose = vi.fn();
+    render(<NewSessionModal isOpen={true} onClose={onClose} onSave={onSave} />);
+    fireEvent.change(screen.getByLabelText(/^Session name$/i), { target: { value: 'edge-1' } });
+    fireEvent.change(screen.getByPlaceholderText(/192\.0\.2\.10/i), { target: { value: '192.0.2.9' } });
+    fireEvent.click(screen.getByRole('tab', { name: /Credentials & Vault/i }));
+    fireEvent.click(screen.getByLabelText(/Save credentials in Encrypted Vault/i));
+    fireEvent.click(await screen.findByRole('button', { name: 'Not now' }));
+    fireEvent.change(screen.getByLabelText(/Login Password/), { target: { value: 's3cret' } });
+    fireEvent.change(screen.getByLabelText(/^Enable password$/), { target: { value: 'en4ble' } });
+    fireEvent.click(screen.getByRole('button', { name: /^save session$/i }));
+    await screen.findByLabelText('Master password');
+    return { onSave, onClose };
+  };
+
+  it('"Save without the password" saves the session, says so first, and stores nothing', async () => {
+    const { onSave, onClose } = await newSessionWithPassword();
+    // What the button does is in its name and in the dialog's text.
+    expect(screen.getByRole('dialog', { name: 'Unlock the vault' }).textContent)
+      .toMatch(/or save the session without the password/);
+    fireEvent.click(screen.getByRole('button', { name: 'Save without the password' }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onClose).toHaveBeenCalled();
+    expect(mockVaultUnlock).not.toHaveBeenCalled();
+    expect(mockVaultSetEntry).not.toHaveBeenCalled();
+    const saved = onSave.mock.calls[0][0];
+    expect(saved.name).toBe('edge-1');
+    expect(saved.hostname).toBe('192.0.2.9');
+    // Not linked to an entry that was never written, and no password in it.
+    expect(saved.extra.PlinkyVaultKey).toBeUndefined();
+    expect(JSON.stringify(saved)).not.toMatch(/s3cret|en4ble/);
+  });
+
+  it('Escape on the unlock goes back to the settings and saves nothing', async () => {
+    const { onSave, onClose } = await newSessionWithPassword();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByLabelText('Master password')).toBeNull());
+    expect(onSave).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    // What was typed is still there for a second try.
+    expect((screen.getByLabelText(/Login Password/) as HTMLInputElement).value).toBe('s3cret');
+  });
+
+  it('with no vault yet, "Save without the password" saves the session too', async () => {
+    mockVaultIsInitialized.mockResolvedValue(false);
+    const onSave = vi.fn();
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} />);
+    fireEvent.change(screen.getByPlaceholderText(/192\.0\.2\.10/i), { target: { value: '192.0.2.8' } });
+    fireEvent.click(screen.getByRole('tab', { name: /Credentials & Vault/i }));
+    fireEvent.click(screen.getByLabelText(/Save credentials in Encrypted Vault/i));
+    fireEvent.change(screen.getByLabelText(/Login Password/), { target: { value: 's3cret' } });
+    fireEvent.click(screen.getByRole('button', { name: /^save session$/i }));
+    await screen.findByRole('dialog', { name: 'Create the vault' });
+    fireEvent.click(screen.getByRole('button', { name: 'Save without the password' }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(mockVaultCreate).not.toHaveBeenCalledWith(expect.anything());
+    expect(mockVaultSetEntry).not.toHaveBeenCalled();
+    expect(onSave.mock.calls[0][0].extra.PlinkyVaultKey).toBeUndefined();
+  });
+
+  it('a saved session keeps the vault entry it had when saved without unlocking', async () => {
+    const onSave = vi.fn();
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} editingSession={savedLinked} />);
+    fireEvent.change(screen.getByLabelText(/^Port$/i), { target: { value: '2222' } });
+    fireEvent.click(screen.getByRole('button', { name: /^save changes$/i }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Save without the password' }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    const saved = onSave.mock.calls[0][0];
+    expect(saved.port).toBe(2222);
+    expect(saved.extra.PlinkyVaultKey).toBe('session:core-rtr');
+    expect(mockVaultSetEntry).not.toHaveBeenCalled();
+  });
+
+  it('a gateway password is not stored either, and the jump host is saved', async () => {
+    const onSave = vi.fn();
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} />);
+    fireEvent.change(screen.getByLabelText(/^Session name$/i), { target: { value: 'Behind-Jump' } });
+    fireEvent.change(screen.getByPlaceholderText(/192\.0\.2\.10/i), { target: { value: '10.0.1.51' } });
+    fireEvent.click(screen.getByLabelText(/Connect through SSH Jump Host/i));
+    fireEvent.change(screen.getByPlaceholderText(/bastion\.internal/i), { target: { value: 'jump.corp.com' } });
+    fireEvent.change(screen.getByPlaceholderText(/bastion_user/i), { target: { value: 'sec_admin' } });
+    fireEvent.change(screen.getByLabelText('Gateway Password'), { target: { value: 'gw-pass' } });
+    fireEvent.click(screen.getByRole('button', { name: /^save session$/i }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Save without the password' }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    const saved = onSave.mock.calls[0][0];
+    expect(saved.extra.ProxyHost).toBe('jump.corp.com');
+    expect(saved.extra.PlinkyJumpVaultKey).toBeUndefined();
+    expect(JSON.stringify(saved)).not.toContain('gw-pass');
+    expect(mockVaultSetEntry).not.toHaveBeenCalled();
+  });
+
+  it('unlocking instead stores both passwords and saves', async () => {
+    const { onSave } = await newSessionWithPassword();
+    mockVaultIsUnlocked.mockResolvedValue(true);
+    fireEvent.change(screen.getByLabelText('Master password'), { target: { value: 'm4ster' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Unlock' }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(mockVaultUnlock).toHaveBeenCalledWith('m4ster');
+    expect(mockVaultSetEntry).toHaveBeenCalledWith(expect.objectContaining({ id: 'session:edge-1', secret: 's3cret', enable_secret: 'en4ble' }));
+    expect(onSave.mock.calls[0][0].extra.PlinkyVaultKey).toBe('session:edge-1');
   });
 });

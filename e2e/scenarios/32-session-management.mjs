@@ -289,4 +289,32 @@ export const tests = [
     await escapeEditor(app);
     assert.deepEqual(await storedNames(app), before, 'nothing saved');
   }],
+
+  ['a password saved with no vault yet: Save creates the vault there, then stores it', async ({ app }) => {
+    assert.equal(await app.invoke('vault_is_initialized'), false, 'a fresh home has no vault');
+    await openEditor(app, (e) => e.click(document.querySelector('button[aria-label="New session"]')));
+    await fillEditor(app, { protocol: 'Telnet', host: '192.0.2.30', name: 'Vaulted R9' });
+    await app.run((e) => e.click([...document.querySelectorAll('[role="tab"]')].find((x) => /Credentials/.test(x.textContent))));
+    await app.waitFor(() => !!document.getElementById('new-session-modal-enable-password'), [], { what: 'the Enable password field' });
+    await app.run((e) => e.fill(document.getElementById('new-session-modal-enable-password'), 'en4ble'));
+    await sleep(50);
+    await save(app);
+    await app.waitFor(() => !!document.getElementById('vault-unlock-confirm'), [], { what: 'the "Create the vault" dialog' });
+    assert.equal(await stored(app, 'Vaulted R9'), undefined, 'nothing saved before the vault is there');
+    await app.run((e) => {
+      e.fill(document.getElementById('vault-unlock-password'), 'e2e-master-pass');
+      e.fill(document.getElementById('vault-unlock-confirm'), 'e2e-master-pass');
+      return true;
+    });
+    await sleep(50);
+    await app.run((e) => e.click([...document.querySelectorAll('[role="dialog"] button[type="submit"]')].find((x) => x.textContent.trim() === 'Create')));
+    await waitForRow(app, 'Vaulted R9', 15000);
+    assert.equal(await editorOpen(app), false, 'the editor closes on save');
+    const s = await stored(app, 'Vaulted R9');
+    assert.equal(s.extra?.PlinkyVaultKey, 'session:Vaulted R9');
+    assert.ok(!Object.values(s.extra ?? {}).includes('en4ble'), 'the password is not in the session file');
+    assert.equal(await app.invoke('vault_is_unlocked'), true);
+    const entry = await app.invoke('vault_get_entry', { key: 'session:Vaulted R9' });
+    assert.equal(entry.enable_secret, 'en4ble');
+  }],
 ];
