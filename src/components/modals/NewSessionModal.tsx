@@ -83,6 +83,9 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
   const [unlockFor, setUnlockFor] = useState<null | 'edit' | 'save'>(null);
   const unlockDeclined = useRef(false);
   const [resubmit, setResubmit] = useState(false);
+  // "Save without the password" in that unlock: the Save goes on and
+  // leaves the vault alone.
+  const saveWithoutVault = useRef(false);
   const formRef = useRef<HTMLFormElement>(null);
   // Whether there is a vault to save into. On a first run there is none:
   // saving a password failed with "Vault is locked ... unlock the vault",
@@ -328,6 +331,15 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
     if (again) setResubmit(true);
   };
 
+  // Cancelling the unlock used to cancel the Save too, with nothing said:
+  // the session and everything typed into it were simply not saved.
+  const saveSkippingVault = () => {
+    setUnlockFor(null);
+    unlockDeclined.current = true;
+    saveWithoutVault.current = true;
+    setResubmit(true);
+  };
+
   // Unlocking the vault with this dialog open fills "Link to existing".
   useEffect(() => {
     if (!isOpen) return;
@@ -359,6 +371,8 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
     const sessionName = name.trim() || hostname.trim() || (protocol === 'Serial' ? serialLine.trim() : '');
     if (!sessionName) return;
     setVaultSaveError(null);
+    const skipVault = saveWithoutVault.current;
+    saveWithoutVault.current = false;
     // Saving writes PuTTY's session of that name, whatever was there: a new
     // session, or a rename, onto a name already saved replaced that other
     // session without a word (e2e suite). Compared without case: Windows
@@ -372,11 +386,20 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
       return;
     }
 
-    // Writing or checking a vault entry needs it unlocked: ask, then carry on.
-    const needsVault = (useVault && vaultMode === 'new') || (!!jumpPassword && enableJumpHost);
-    if (needsVault && vaultState !== 'none' && !(await vaultIsUnlocked().catch(() => false))) {
-      setUnlockFor('save');
-      return;
+    // Writing or checking a vault entry needs it unlocked: ask, then carry
+    // on. With no vault yet and a password to keep, offer to create one.
+    const jumpInUse = protocol === 'SSH' && enableJumpHost && !jumpPreset && !!jumpHost.trim();
+    const typedSecret = (useVault && vaultMode === 'new' && (!!vaultPassword || !!vaultEnablePassword)) || (jumpInUse && !!jumpPassword);
+    const needsVault = (useVault && vaultMode === 'new') || (jumpInUse && !!jumpPassword);
+    let noVault = vaultState === 'none';
+    if (needsVault && !skipVault) {
+      noVault = !(await vaultIsInitialized().catch(() => true));
+      const open = !noVault && await vaultIsUnlocked().catch(() => false);
+      if (!open && (!noVault || typedSecret)) {
+        setVaultState(noVault ? 'none' : 'locked');
+        setUnlockFor('save');
+        return;
+      }
     }
 
     const isSerial = protocol === 'Serial';
@@ -443,9 +466,11 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
 
     // The jump host's own vault login. A saved session picked as the jump
     // host brings its own vault entry, so nothing is stored for it here.
-    const jumpInUse = protocol === 'SSH' && enableJumpHost && !jumpPreset && !!jumpHost.trim();
-    if (jumpInUse && jumpPassword) {
-      if (vaultState === 'none') {
+    if (jumpInUse && jumpPassword && skipVault) {
+      // Saved without the vault: the password typed is not stored, and a
+      // stored one this session already had stays linked.
+    } else if (jumpInUse && jumpPassword) {
+      if (noVault) {
         setVaultSaveError(NO_VAULT_MESSAGE);
         setTab('jump');
         return;
@@ -483,9 +508,15 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
     if (useVault) {
       if (vaultMode === 'link' && selectedVaultKey) {
         extra.PlinkyVaultKey = selectedVaultKey;
+      } else if (vaultMode === 'new' && skipVault) {
+        // Saved without the vault: nothing is written to it, and the session
+        // keeps only the entry it already had (one it can't check is not
+        // linked: a link to an entry that isn't there finds nothing).
+        const finalKeyId = vaultKeyId.trim() || `session:${sessionName}`;
+        if (finalKeyId !== savedVaultKey) delete extra.PlinkyVaultKey;
       } else if (vaultMode === 'new') {
         const finalKeyId = vaultKeyId.trim() || `session:${sessionName}`;
-        if ((vaultPassword || vaultEnablePassword) && vaultState === 'none') {
+        if ((vaultPassword || vaultEnablePassword) && noVault) {
           setVaultSaveError(NO_VAULT_MESSAGE);
           setTab('credentials');
           return;
@@ -1005,9 +1036,16 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
                   )}
                 </div>
                 {useVault && vaultState === 'none' && (
-                  <p role="status" className="p-2 rounded border border-amber-500/40 bg-amber-950/30 text-amber-300 text-meta">
-                    No vault yet. Create one first: Vault in the top bar, then set a master password. Until then a password here can't be saved.
-                  </p>
+                  <div role="status" className="flex items-center justify-between gap-2 p-2 rounded border border-amber-500/40 bg-amber-950/30 text-amber-300 text-meta">
+                    <span>No vault yet, so a password here can't be saved. Create one now, or Save asks for it.</span>
+                    <button
+                      type="button"
+                      onClick={() => setUnlockFor('edit')}
+                      className="shrink-0 px-2 py-0.5 rounded border border-amber-500/50 text-amber-200 hover:bg-amber-500/10"
+                    >
+                      Create vault…
+                    </button>
+                  </div>
                 )}
                 {useVault && vaultState === 'locked' && (
                   <div role="status" className="flex items-center justify-between gap-2 p-2 rounded border border-amber-500/40 bg-amber-950/30 text-amber-300 text-meta">
@@ -1698,11 +1736,19 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
           </div>
         {unlockFor && (
             <VaultUnlockDialog
-              reason={unlockFor === 'save'
-                ? 'Saving this session writes its password to the vault. Unlock it and the save carries on.'
-                : 'This session keeps its password in the vault. Unlock it to see or change the entry.'}
+              mode={vaultState === 'none' ? 'create' : 'unlock'}
+              reason={vaultState === 'none'
+                ? (unlockFor === 'save'
+                  ? 'There is no vault yet to keep this session\'s password in. Create one and the save carries on, or save the session without the password.'
+                  : 'Passwords are kept in the vault. Create one, then save the session to store its password in it.')
+                : (unlockFor === 'save'
+                  ? 'Saving this session writes its password to the vault. Unlock it and the save carries on, or save the session without the password.'
+                  : 'This session keeps its password in the vault. Unlock it to see or change the entry.')}
               onUnlocked={() => { void afterUnlock(); }}
+              /* Escape goes back to the settings, nothing saved. */
               onCancel={() => { unlockDeclined.current = true; setUnlockFor(null); }}
+              onSkip={unlockFor === 'save' ? saveSkippingVault : undefined}
+              skipLabel="Save without the password"
             />
           )}
         </form>

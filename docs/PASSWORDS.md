@@ -43,6 +43,19 @@ a damaged or altered file) is refused before any work is done.
 - Deleting the vault (Settings) asks for confirmation; it removes the file
   for good.
 
+### Saving a session's password with the vault locked
+
+Saving a session with a password typed in its settings (login, enable or
+jump host) needs the vault open. With the vault locked, **Save asks for the
+master password** there and then, and the save carries on once it is
+unlocked. With no vault yet, it offers to **create one** with a new master
+password (twice, at least 8 characters).
+
+Choosing **Save without the password** instead saves the session's other
+settings and stores no password: the vault is not touched, and a session
+that already used a vault entry keeps it. Escape goes back to the settings
+without saving anything.
+
 ## When a password leaves the vault
 
 ### Logging in to an SSH session
