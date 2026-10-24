@@ -30,6 +30,11 @@ export const VaultUnlockDialog: React.FC<Props> = ({ reason, mode = 'unlock', on
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  // While the vault is being unlocked or created, neither button nor Escape
+  // can leave: "Save without the password" would save while the vault
+  // opens anyway.
+  const busyRef = useRef(false);
+  busyRef.current = busy;
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -38,7 +43,7 @@ export const VaultUnlockDialog: React.FC<Props> = ({ reason, mode = 'unlock', on
       if (e.key !== 'Escape') return;
       e.stopPropagation();
       e.preventDefault();
-      onCancel();
+      if (!busyRef.current) onCancel();
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
@@ -138,7 +143,8 @@ export const VaultUnlockDialog: React.FC<Props> = ({ reason, mode = 'unlock', on
           <button
             type="button"
             onClick={onSkip ?? onCancel}
-            className="px-3 py-1.5 rounded border border-plinky-700 text-slate-200 hover:bg-plinky-800 text-xs"
+            disabled={busy}
+            className="px-3 py-1.5 rounded border border-plinky-700 text-slate-200 hover:bg-plinky-800 text-xs disabled:opacity-50"
           >
             {onSkip ? (skipLabel ?? 'Skip') : 'Not now'}
           </button>
