@@ -96,6 +96,24 @@ impl ActiveSession {
     }
 }
 
+/// Sends a chunk's output to the page attached to a session, unless that
+/// page already got the chunk in its attach replay. The reader puts a chunk
+/// in scrollback under the sessions lock and sends it after releasing it; an
+/// attach in between replayed the chunk, and sending it as well drew it
+/// twice. `chunk_end` is where the chunk ends in scrollback.
+fn send_fresh(
+    subscriber: &Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>,
+    replayed_to: &AtomicU64,
+    chunk_end: u64,
+    bytes: Vec<u8>,
+) -> bool {
+    let sub = subscriber.lock().unwrap();
+    match sub.as_ref() {
+        Some(tx) if chunk_end > replayed_to.load(Ordering::SeqCst) => tx.send(bytes).is_ok(),
+        _ => false,
+    }
+}
+
 pub struct ActiveSession {
     pub id: String,
     pub name: String,
@@ -103,6 +121,9 @@ pub struct ActiveSession {
     pub state_machine: PreAuthStateMachine,
     pub scrollback: ScrollbackRingBuffer,
     pub subscriber: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
+    /// How far into scrollback the attached page's replay went (see
+    /// `send_fresh`). Set with `subscriber`, under its lock.
+    pub replayed_to: Arc<AtomicU64>,
     /// Written to disk as output arrives (see `session::log`).
     pub log: Option<super::log::SessionLog>,
     /// How far the attached page is behind (ADR-006). Shared with the
@@ -243,6 +264,8 @@ impl SessionRegistry {
         let id_owned = id.to_string();
         let subscriber = Arc::new(Mutex::new(Some(out_tx)));
         let sub_clone = subscriber.clone();
+        let replayed_to = Arc::new(AtomicU64::new(0));
+        let replayed_clone = replayed_to.clone();
         let registry_clone = self.clone();
         let id_for_task = id.to_string();
         let instance = NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed);
@@ -254,10 +277,12 @@ impl SessionRegistry {
             // not, raw_rx hit EOF: the process exited on its own.
             let mut reported = false;
             while let Some(chunk) = raw_rx.recv().await {
+                let chunk_end: u64;
                 let action = {
                     let mut lock = registry_clone.sessions.lock().unwrap();
                     if let Some(session) = lock.get_mut(&id_for_task).filter(|s| s.instance == instance) {
                         session.scrollback.push(&chunk);
+                        chunk_end = session.scrollback.total_bytes_written() as u64;
                         session.feed_tap(&chunk);
                         session.echoes.saw(&chunk);
                         // PuTTY-style "all session output" logging: every raw
@@ -288,28 +313,22 @@ impl SessionRegistry {
                 let mut forwarded = 0usize;
                 match action {
                     PreAuthAction::Hold => {
-                        if let Some(tx) = sub_clone.lock().unwrap().as_ref() {
-                            if tx.send(chunk).is_ok() {
-                                forwarded = chunk_len;
-                            }
+                        if send_fresh(&sub_clone, &replayed_clone, chunk_end, chunk) {
+                            forwarded = chunk_len;
                         }
                     }
                     PreAuthAction::PassThrough(bytes) | PreAuthAction::TransitionToLive(bytes) => {
-                        if let Some(tx) = sub_clone.lock().unwrap().as_ref() {
-                            let n = bytes.len();
-                            if tx.send(bytes).is_ok() {
-                                forwarded = n;
-                            }
+                        let n = bytes.len();
+                        if send_fresh(&sub_clone, &replayed_clone, chunk_end, bytes) {
+                            forwarded = n;
                         }
                     }
                     PreAuthAction::Suppress => {}
                     PreAuthAction::Withhold(shown) => {
                         if !shown.is_empty() {
-                            if let Some(tx) = sub_clone.lock().unwrap().as_ref() {
-                                let n = shown.len();
-                                if tx.send(shown).is_ok() {
-                                    forwarded = n;
-                                }
+                            let n = shown.len();
+                            if send_fresh(&sub_clone, &replayed_clone, chunk_end, shown) {
+                                forwarded = n;
                             }
                         }
                     }
@@ -365,6 +384,7 @@ impl SessionRegistry {
             state_machine: sm,
             scrollback: ScrollbackRingBuffer::new(2 * 1024 * 1024), // 2 MiB
             subscriber,
+            replayed_to,
             log: log_file,
             flow,
             instance,
@@ -479,6 +499,8 @@ impl SessionRegistry {
         let id_owned = id.to_string();
         let subscriber = Arc::new(Mutex::new(Some(out_tx)));
         let sub_clone = subscriber.clone();
+        let replayed_to = Arc::new(AtomicU64::new(0));
+        let replayed_clone = replayed_to.clone();
         let registry_clone = self.clone();
         let id_for_task = id.to_string();
         let instance = NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed);
@@ -493,10 +515,12 @@ impl SessionRegistry {
             let mut begin_gate: Option<super::begin_gate::BeginGate> = None;
             while let Some(chunk) = raw_rx.recv().await {
                 let mut script_note: Option<String> = None;
+                let chunk_end: u64;
                 let action = {
                     let mut lock = registry_clone.sessions.lock().unwrap();
                     if let Some(session) = lock.get_mut(&id_for_task).filter(|s| s.instance == instance) {
                         session.scrollback.push(&chunk);
+                        chunk_end = session.scrollback.total_bytes_written() as u64;
                         session.feed_tap(&chunk);
                         session.echoes.saw(&chunk);
                         if let Some(log) = session.log.as_mut() {
@@ -556,21 +580,17 @@ impl SessionRegistry {
                     PreAuthAction::Hold => {
                         // Forward pre-auth interactive bytes (username prompt, password prompt, login banner)
                         // directly to the subscriber so the user can see prompts and enter credentials.
-                        if let Some(tx) = sub_clone.lock().unwrap().as_ref() {
-                            if tx.send(chunk).is_ok() {
-                                forwarded = chunk_len;
-                            }
+                        if send_fresh(&sub_clone, &replayed_clone, chunk_end, chunk) {
+                            forwarded = chunk_len;
                         }
                     }
                     PreAuthAction::PassThrough(bytes) => {
                         // Still watching for plink's begin prompt: on Windows
                         // its line can arrive after the marker's chunk.
                         let answer = begin_gate.as_mut().map(|g| g.feed(&bytes));
-                        if let Some(tx) = sub_clone.lock().unwrap().as_ref() {
-                            let n = bytes.len();
-                            if tx.send(bytes).is_ok() {
-                                forwarded = n;
-                            }
+                        let n = bytes.len();
+                        if send_fresh(&sub_clone, &replayed_clone, chunk_end, bytes) {
+                            forwarded = n;
                         }
                         if let Some(outcome @ (super::begin_gate::Gate::Answer | super::begin_gate::Gate::Done)) = answer {
                             begin_gate = None;
@@ -586,10 +606,8 @@ impl SessionRegistry {
                         }
                     }
                     PreAuthAction::TransitionToLive(bytes) => {
-                        if let Some(tx) = sub_clone.lock().unwrap().as_ref() {
-                            if tx.send(bytes.clone()).is_ok() {
-                                forwarded = bytes.len();
-                            }
+                        if send_fresh(&sub_clone, &replayed_clone, chunk_end, bytes.clone()) {
+                            forwarded = bytes.len();
                         }
                         // plink prints "Press Return to begin session." as a
                         // one-time continuation gate right after auth
@@ -617,11 +635,9 @@ impl SessionRegistry {
                     PreAuthAction::Suppress => {}
                     PreAuthAction::Withhold(shown) => {
                         if !shown.is_empty() {
-                            if let Some(tx) = sub_clone.lock().unwrap().as_ref() {
-                                let n = shown.len();
-                                if tx.send(shown).is_ok() {
-                                    forwarded = n;
-                                }
+                            let n = shown.len();
+                            if send_fresh(&sub_clone, &replayed_clone, chunk_end, shown) {
+                                forwarded = n;
                             }
                         }
                     }
@@ -672,7 +688,7 @@ impl SessionRegistry {
         // sessions (switch consoles, legacy gear) have no such phase -- plink
         // never prints the marker, so they sat in PreAuth forever: skipped by
         // sync broadcast, and force-closed once device output passed the
-        // 8 KiB cap (one `show running-config`). Every byte on those is device
+        // pre-auth cap (then 8 KiB: one `show running-config`). Every byte on those is device
         // output from the start, so they begin Live. A saved session decides
         // by its own protocol (plink -loads it); otherwise the explicit
         // target does -- GNS3 opens device consoles as `--telnet host port`.
@@ -691,6 +707,7 @@ impl SessionRegistry {
             state_machine,
             scrollback: ScrollbackRingBuffer::new(2 * 1024 * 1024),
             subscriber,
+            replayed_to,
             log: log_file,
             flow,
             instance,
@@ -767,7 +784,13 @@ impl SessionRegistry {
             .ok_or_else(|| PlinkyError::SessionNotFound(id.to_string()))?;
 
         let (replay_data, truncated) = session.scrollback.get_since(from_seq);
-        *session.subscriber.lock().unwrap() = Some(out_tx);
+        {
+            // The replay covers everything in scrollback now; a chunk the
+            // reader put there but hasn't sent yet is not sent again.
+            let mut sub = session.subscriber.lock().unwrap();
+            session.replayed_to.store(session.scrollback.total_bytes_written() as u64, Ordering::SeqCst);
+            *sub = Some(out_tx);
+        }
         session.flow.attach();
         let pending_prompt = match session.state_machine.state() {
             SessionState::HostKeyPending { prompt } => Some(prompt.clone()),
@@ -1182,6 +1205,7 @@ mod logon_tests {
             state_machine,
             scrollback: ScrollbackRingBuffer::new(4096),
             subscriber: Arc::new(Mutex::new(None)),
+            replayed_to: Default::default(),
             log: None,
             flow: Arc::new(FlowGate::new(1 << 20)),
             instance: 0,
@@ -1191,6 +1215,28 @@ mod logon_tests {
             logon: None,
             echoes: Default::default(),
         }
+    }
+
+    #[test]
+    fn an_attach_replay_is_not_sent_again_live() {
+        // The reader puts a chunk in scrollback, then sends it; an attach in
+        // between replays it. The send that follows must not draw it twice.
+        let registry = SessionRegistry::new();
+        let mut s = session(Arc::new(Mutex::new(Vec::new())));
+        s.scrollback.push(b"R5#show clock\r\n");
+        let pushed = s.scrollback.total_bytes_written() as u64;
+        let (sub, replayed) = (s.subscriber.clone(), s.replayed_to.clone());
+        registry.insert_new_session("t".into(), s).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let info = registry.attach_session("t", tx, 0).unwrap();
+        assert_eq!(info.replay_data, b"R5#show clock\r\n");
+        assert_eq!(replayed.load(Ordering::SeqCst), pushed);
+        // The chunk the replay already had: not sent.
+        assert!(!send_fresh(&sub, &replayed, pushed, b"R5#show clock\r\n".to_vec()));
+        assert!(rx.try_recv().is_err());
+        // The next one is.
+        assert!(send_fresh(&sub, &replayed, pushed + 6, b"*10:00".to_vec()));
+        assert_eq!(rx.try_recv().unwrap(), b"*10:00");
     }
 
     fn actions() -> crate::session::expect::Expect {
