@@ -491,6 +491,22 @@ export const tests = [
     assert.equal(await termFocused(), true, 'the mouse over the terminal gave it the keyboard');
   }],
 
+  ['a copied line has no spaces at its end, like PuTTY', async ({ app, r1 }) => {
+    // IOS ends some lines in a space. Copied and pasted back into a
+    // `username ... password` line, the space became part of the password.
+    await command(app, r1, 'show trailing');
+    await app.waitForScreen('END-TRAILING');
+    const row = await app.run((e) => e.screen().findLastIndex((l) => l.startsWith(' default-router')));
+    // Drag from the line before it to the far right edge, past the space.
+    await app.run((e, r) => e.selectCells(0, r - 1, e.termSize().cols - 1, r), row);
+    await app.key('Ctrl+Shift+C');
+    const copied = await waitUntil(async () => {
+      const c = await getClipboard(app);
+      return c.includes('default-router') ? c : null;
+    }, { what: 'the copy', timeoutMs: 5000 });
+    assert.equal(copied.replace(/\r\n/g, '\n'), 'ip dhcp pool LOCAL\n default-router 10.10.10.1');
+  }],
+
   ['a longer scrollback from Settings keeps a long listing whole for Select All and copy', async ({ app, r1 }) => {
     // xterm's fixed 1,000 lines cut a long show tech-support off at the top.
     await app.run((e) => e.click(document.querySelector('[aria-label="Settings"]')));

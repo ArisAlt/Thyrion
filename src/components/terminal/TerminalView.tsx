@@ -64,7 +64,7 @@ import { VaultUnlockDialog } from '../vault/VaultUnlockDialog';
 import { fatalHint, sshBannerHint } from '../../services/fatalHint';
 import { askPaste, needsPasteConfirm } from '../../services/pasteConfirm';
 import { terminalShortcut, keySequenceFor } from '../../services/shortcuts';
-import { readClipboard, writeClipboard } from '../../services/clipboard';
+import { readClipboard, writeClipboard, copiedText } from '../../services/clipboard';
 import { DEFAULT_TERMINAL_FONT, loadTerminalFont } from '../../themes/fonts';
 import {
   FileCode,
@@ -1066,7 +1066,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     // PuTTY Classic: Copy on select
     term.onSelectionChange(() => {
       if (copyOnSelectRef.current) {
-        const selection = term.getSelection();
+        const selection = copiedText(term.getSelection());
         if (selection && selection.length > 0) void writeClipboard(selection);
       }
     });
@@ -1293,7 +1293,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       if (action === 'sendEnable') {
         requestEnableRef.current();
       } else if (action === 'copy') {
-        const selection = term.getSelection();
+        const selection = copiedText(term.getSelection());
         if (selection) void writeClipboard(selection);
       } else if (action === 'selectAll') {
         term.selectAll();
@@ -1601,7 +1601,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   };
 
   const handleCopy = () => {
-    const selection = terminalRef.current?.getSelection();
+    const selection = copiedText(terminalRef.current?.getSelection() ?? '');
     if (selection) void writeClipboard(selection);
     setContextMenu(null);
   };

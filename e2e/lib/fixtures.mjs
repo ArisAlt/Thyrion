@@ -96,6 +96,9 @@ export async function startConsole({ name = 'R1', negotiate = true, host = '127.
         const rows = [];
         for (let i = 1; i <= n; i++) rows.push(`line ${String(i).padStart(6, '0')} of ${n} ${'x'.repeat(40)}`);
         out = rows.join('\r\n') + `\r\nEND-OF-OUTPUT ${n}\r\n`;
+      } else if (cmd === 'show trailing') {
+        // As IOS prints some config lines: with a space on the end.
+        out = 'ip dhcp pool LOCAL \r\n default-router 10.10.10.1 \r\nEND-TRAILING\r\n';
       } else if (cmd === 'show utf8') {
         out = 'Καλημέρα κόσμε ✓ — ψ\r\n';
       } else if (cmd === 'show size') {
