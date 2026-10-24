@@ -99,14 +99,15 @@ fn test_preauth_hostkey_prompt_detection_verbatim() {
 #[test]
 fn test_preauth_buffer_cap_default_deny() {
     let mut sm = PreAuthStateMachine::new();
-    let junk = vec![b'X'; 8193];
+    // 8 KiB once; a long login banner went past that (state_machine.rs).
+    let junk = vec![b'X'; PreAuthStateMachine::MAX_PREAUTH_BUFFER_LEN + 1];
     let action = sm.feed_bytes(&junk);
 
     match action {
         PreAuthAction::Closed(CloseReason::Error(msg)) => {
-            assert!(msg.contains("PreAuth buffer exceeded 8KiB cap"));
+            assert!(msg.contains("PreAuth buffer exceeded 64 KiB"));
         }
-        _ => panic!("Expected Closed(Error) when PreAuth buffer exceeds 8 KiB"),
+        _ => panic!("Expected Closed(Error) when PreAuth buffer exceeds its cap"),
     }
     assert!(!sm.is_live());
 }

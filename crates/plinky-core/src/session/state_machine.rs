@@ -1,4 +1,5 @@
 use regex::Regex;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HostKeyPromptInfo {
@@ -34,8 +35,8 @@ pub struct HostKeyPromptInfo {
 impl HostKeyPromptInfo {
     pub fn parse(raw: &str) -> Self {
         // Parse host and port: e.g. "  192.0.2.1 (port 22)"
-        let host_port_regex = Regex::new(r"(?m)^\s+([^\s]+)\s+\(port\s+(\d+)\)").unwrap();
-        let (host, port) = if let Some(caps) = host_port_regex.captures(raw) {
+        static HOST_PORT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^\s+([^\s]+)\s+\(port\s+(\d+)\)").unwrap());
+        let (host, port) = if let Some(caps) = HOST_PORT.captures(raw) {
             let h = caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
             let p = caps.get(2).and_then(|m| m.as_str().parse::<u16>().ok()).unwrap_or(22);
             (h, p)
@@ -44,11 +45,11 @@ impl HostKeyPromptInfo {
         };
 
         // Parse key type and fingerprint: e.g. "SHA256:..."
-        let fp_regex = Regex::new(r"SHA256:[A-Za-z0-9+/=]+").unwrap();
-        let fingerprint = fp_regex.find(raw).map(|m| m.as_str().to_string()).unwrap_or_default();
+        static FINGERPRINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"SHA256:[A-Za-z0-9+/=]+").unwrap());
+        let fingerprint = FINGERPRINT.find(raw).map(|m| m.as_str().to_string()).unwrap_or_default();
 
-        let type_regex = Regex::new(r"(ssh-ed25519|ssh-rsa|ecdsa-sha2-[a-z0-9]+)").unwrap();
-        let key_type = type_regex.find(raw).map(|m| m.as_str().to_string()).unwrap_or_else(|| "unknown".to_string());
+        static KEY_TYPE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(ssh-ed25519|ssh-rsa|ecdsa-sha2-[a-z0-9]+)").unwrap());
+        let key_type = KEY_TYPE.find(raw).map(|m| m.as_str().to_string()).unwrap_or_else(|| "unknown".to_string());
 
         Self {
             host,
@@ -65,11 +66,13 @@ impl HostKeyPromptInfo {
     /// plink's weak-crypto question (PuTTY's `confirm_weak_crypto_primitive`
     /// and `confirm_weak_cached_hostkey`), or None if `raw` isn't one.
     pub fn parse_weak(raw: &str) -> Option<Self> {
-        let rx = Regex::new(
-            r"(?s)The first (.+?) (?:supported by the server|we have stored for this server)\s+is\s+(\S+), which is below the configured warning threshold",
-        )
-        .unwrap();
-        let caps = rx.captures(raw)?;
+        static WEAK: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(
+                r"(?s)The first (.+?) (?:supported by the server|we have stored for this server)\s+is\s+(\S+), which is below the configured warning threshold",
+            )
+            .unwrap()
+        });
+        let caps = WEAK.captures(raw)?;
         let what = caps.get(1)?.as_str().trim().to_string();
         let alg = caps.get(2)?.as_str().trim().to_string();
         Some(Self {
@@ -86,9 +89,10 @@ impl HostKeyPromptInfo {
 
     /// A (y/n) question at the very end of the output, or None.
     pub fn parse_question(raw: &str) -> Option<Self> {
-        let rx = Regex::new(r"\(y/n[^)\n]*\)\s*$").unwrap();
+        // Checked on every pre-auth read: compiled once.
+        static QUESTION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\(y/n[^)\n]*\)\s*$").unwrap());
         let trimmed = raw.trim_end_matches(['\r', '\n']);
-        if !rx.is_match(trimmed) {
+        if !QUESTION.is_match(trimmed) {
             return None;
         }
         let lines: Vec<&str> = trimmed.lines().map(|l| l.trim_end_matches('\r')).collect();
@@ -147,7 +151,6 @@ pub enum PreAuthAction {
 pub struct PreAuthStateMachine {
     state: SessionState,
     buffer: Vec<u8>,
-    access_granted_regex: Regex,
     hostkey_prompt_regex: Regex,
     /// Inside plink's host-key notice, before its question. That text used to
     /// reach the terminal and stay there after the dialog was answered, with
@@ -192,15 +195,33 @@ const HOSTKEY_NOTICE_MARKERS: [&str; 6] = [
     "cipher supported by the server is",
 ];
 
+/// Where the D9 marker ends: plink's own "Access granted", right upon auth
+/// success. Only the words, then plink's ". Press Return to begin session."
+/// or the end of the line: that rest is live output, which begin_gate
+/// answers. The words anywhere else (a banner's "Access granted to
+/// authorised personnel only") are not the login being over: taken for it,
+/// logon actions were typed into the password prompt. Not tied to the line
+/// start: ConPTY can put escapes there.
+fn access_granted_end(text: &str) -> Option<usize> {
+    const WORDS: &str = "Access granted";
+    const PLINKS_REST: &str = ". Press Return to begin session.";
+    text.match_indices(WORDS).find_map(|(at, _)| {
+        let end = at + WORDS.len();
+        let after = &text[end..];
+        (after.is_empty() || after.starts_with(['\r', '\n']) || after.starts_with(PLINKS_REST)).then_some(end)
+    })
+}
+
 impl PreAuthStateMachine {
-    pub const MAX_PREAUTH_BUFFER_LEN: usize = 8192;
+    /// What may come before the login is over before the session is closed
+    /// as unrecognised. Larger than any login banner seen: 8 KiB closed
+    /// sessions to servers with long legal banners, which PuTTY logs in to.
+    pub const MAX_PREAUTH_BUFFER_LEN: usize = 64 * 1024;
 
     pub fn new() -> Self {
         Self {
             state: SessionState::PreAuth,
             buffer: Vec::with_capacity(2048),
-            // D9 Marker: PuTTY plink outputs "Access granted" right upon auth success
-            access_granted_regex: Regex::new(r"Access granted").unwrap(),
             // Verbatim PuTTY 0.85 hostkey prompt indicators per DEEP_DESIGN.md §2 & §3
             // Matched on the final action prompt line so earlier lines (host, port, fingerprint) are already in the buffer
             hostkey_prompt_regex: Regex::new(
@@ -263,10 +284,10 @@ impl PreAuthStateMachine {
         let visible_before = self.buffer.len();
         self.buffer.extend_from_slice(chunk);
 
-        // 8 KiB PreAuth bounded default-deny: fail closed on unrecognized output
+        // Bounded default-deny: fail closed on unrecognized output
         if self.buffer.len() > Self::MAX_PREAUTH_BUFFER_LEN {
             let reason = CloseReason::Error(
-                "PreAuth buffer exceeded 8KiB cap without recognized marker — plink version mismatch?".to_string()
+                "PreAuth buffer exceeded 64 KiB without recognized marker — plink version mismatch?".to_string()
             );
             self.state = SessionState::Closed(reason.clone());
             self.buffer.clear();
@@ -292,10 +313,9 @@ impl PreAuthStateMachine {
         }
 
         // Check for D9 "Access granted" boundary marker
-        if let Some(mat) = self.access_granted_regex.find(&text) {
+        if let Some(match_end) = access_granted_end(&text) {
             self.state = SessionState::Live;
             // Any bytes appearing after the match belong to the live session
-            let match_end = mat.end();
             let remaining = if match_end < self.buffer.len() {
                 self.buffer[match_end..].to_vec()
             } else {
@@ -599,5 +619,42 @@ mod weak_crypto_tests {
         // Ordinary pre-auth text that merely mentions (y/n) mid-line is not a question.
         let mut sm = PreAuthStateMachine::new();
         assert!(!matches!(sm.feed_bytes(b"Answer (y/n) at each prompt.\r\nlogin as: "), PreAuthAction::HostKeyPrompt(_)));
+    }
+}
+
+#[cfg(test)]
+mod login_end_tests {
+    use super::*;
+
+    const GRANTED: &[u8] = b"-- End of keyboard-interactive prompts from server ---\r\nAccess granted. Press Return to begin session.\r\n";
+
+    #[test]
+    fn a_long_login_banner_does_not_close_the_session() {
+        // 8 KiB closed it, before the password was even asked for.
+        let mut sm = PreAuthStateMachine::new();
+        let line = b"| THIS SYSTEM IS FOR THE USE OF AUTHORIZED USERS ONLY. ACTIVITY IS MONITORED. |\r\n";
+        for _ in 0..(20 * 1024 / line.len()) {
+            assert!(!matches!(sm.feed_bytes(line), PreAuthAction::Closed(_)));
+        }
+        assert!(!matches!(sm.feed_bytes(b"Password: "), PreAuthAction::Closed(_)));
+        assert!(matches!(sm.feed_bytes(GRANTED), PreAuthAction::TransitionToLive(_)));
+        assert!(sm.is_live());
+    }
+
+    #[test]
+    fn a_banner_saying_access_granted_is_not_the_login_ending() {
+        let mut sm = PreAuthStateMachine::new();
+        sm.feed_bytes(b"Access granted to authorised personnel only.\r\nUnauthorised access is prohibited.\r\n");
+        sm.feed_bytes(b"Keyboard-interactive authentication prompts from server:\r\n| Password: ");
+        assert!(!sm.is_live(), "still at the password prompt");
+        assert!(matches!(sm.feed_bytes(GRANTED), PreAuthAction::TransitionToLive(_)));
+    }
+
+    #[test]
+    fn plinks_line_split_after_the_words_still_ends_the_login() {
+        // On Windows the rest of plink's line can come in a later read.
+        let mut sm = PreAuthStateMachine::new();
+        sm.feed_bytes(b"-- End of keyboard-interactive prompts from server ---\r\n");
+        assert!(matches!(sm.feed_bytes(b"Access granted"), PreAuthAction::TransitionToLive(_)));
     }
 }
