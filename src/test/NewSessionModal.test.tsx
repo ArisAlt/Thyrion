@@ -664,6 +664,19 @@ describe('the session editor tabs (T-014)', () => {
     expect(jumpTab.querySelector('span[aria-hidden]')).toBeTruthy();
   });
 
+  it('adds a platform\'s logon actions from its preset, and saves them', () => {
+    const onSave = vi.fn();
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} />);
+    fireEvent.change(screen.getByLabelText(/^Session name$/i), { target: { value: 'core-sw1' } });
+    fireEvent.change(screen.getByPlaceholderText(/192\.0\.2\.10/i), { target: { value: '192.0.2.5' } });
+    fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
+    fireEvent.change(screen.getByLabelText('Add the commands for a platform'), { target: { value: 'cisco-ios' } });
+    expect((screen.getByLabelText('Logon action 1: send') as HTMLInputElement).value).toBe('terminal length 0');
+    expect((screen.getByLabelText('Logon action 2: send') as HTMLInputElement).value).toBe('terminal width 511');
+    fireEvent.click(screen.getByRole('button', { name: /^save session$/i }));
+    expect(JSON.parse(onSave.mock.calls[0][0].extra.PlinkyLogonActions)).toEqual([['', 'terminal length 0'], ['', 'terminal width 511']]);
+  });
+
   it('opens on General again', () => {
     const { rerender } = render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={vi.fn()} />);
     fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));

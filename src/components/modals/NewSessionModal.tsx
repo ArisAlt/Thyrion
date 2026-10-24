@@ -11,6 +11,7 @@ import {
   VAULT_CHANGED_EVENT,
 } from '../../services/tauriBridge';
 import { VaultUnlockDialog } from '../vault/VaultUnlockDialog';
+import { LOGON_PRESETS, withPreset } from '../../services/logonPresets';
 import { sessionsUsingVaultEntry } from '../../services/vaultKeys';
 import { TAB_COLORS, LogonAction, parseLogonActions, serializeLogonActions } from '../../services/tabColors';
 import { TERMINAL_THEMES, MATCH_INTERFACE, findTerminalTheme, useTerminalTheme } from '../../themes/terminalThemes';
@@ -1703,13 +1704,27 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
                     </button>
                   </div>
                 ))}
-                <button
-                  type="button"
-                  onClick={() => setLogonActions(list => [...list, { wait: '#', send: '' }])}
-                  className="px-2 py-0.5 rounded bg-plinky-800 hover:bg-plinky-700 text-slate-300"
-                >
-                  Add a logon action
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setLogonActions(list => [...list, { wait: '#', send: '' }])}
+                    className="px-2 py-0.5 rounded bg-plinky-800 hover:bg-plinky-700 text-slate-300"
+                  >
+                    Add a logon action
+                  </button>
+                  {/* The commands a platform needs so output isn't paged (logonPresets.ts). */}
+                  <select
+                    value=""
+                    onChange={e => { const id = e.target.value; if (id) setLogonActions(list => withPreset(list, id)); }}
+                    aria-label="Add the commands for a platform"
+                    className="bg-plinky-900 border border-plinky-700 rounded px-1.5 py-0.5 text-slate-300 text-xs focus:outline-none focus:border-sky-500"
+                  >
+                    <option value="">Add for a platform…</option>
+                    {LOGON_PRESETS.map(p => (
+                      <option key={p.id} value={p.id}>{p.label}: {p.commands.join(', ')}</option>
+                    ))}
+                  </select>
+                </div>
               </div>
 
             </div>
