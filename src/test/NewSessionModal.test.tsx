@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import { NewSessionModal } from '../components/modals/NewSessionModal';
 
@@ -767,6 +767,36 @@ describe('saving a password when there is no vault yet', () => {
     render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={vi.fn()} />);
     fillSession();
     expect((await screen.findByRole('status')).textContent).toMatch(/The vault is locked/);
+  });
+
+  it('a wrong master password, then the right one: the unlock window closes and stays closed', async () => {
+    // Reported: the window stayed open. Closing it marked the vault unlocked
+    // only after the entries had loaded; in between, "Credentials open with
+    // the vault locked" asked for the master password again.
+    mockVaultIsInitialized.mockResolvedValue(true);
+    mockVaultIsUnlocked.mockResolvedValue(false);
+    mockVaultUnlock.mockRejectedValueOnce('bad password').mockResolvedValueOnce(true);
+    const entries = [{ id: 'router-cisco-core', has_enable_secret: true }];
+    mockVaultListEntriesMeta.mockImplementation(() => new Promise(r => setTimeout(() => r(entries), 50)));
+    try {
+      render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={vi.fn()} />);
+      fillSession();
+      const unlock = async (pw: string) => {
+        fireEvent.change(await screen.findByLabelText('Master password'), { target: { value: pw } });
+        fireEvent.click(screen.getByRole('button', { name: 'Unlock' }));
+      };
+      await unlock('not-it');
+      expect(await screen.findByText(/did not unlock the vault/)).toBeDefined();
+      mockVaultIsUnlocked.mockResolvedValue(true);
+      await unlock('m4ster-pass');
+      await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Unlock the vault' })).toBeNull());
+      // And it stays closed once the entries are in.
+      await act(async () => { await new Promise(r => setTimeout(r, 200)); });
+      expect(screen.queryByRole('dialog', { name: 'Unlock the vault' })).toBeNull();
+    } finally {
+      mockVaultListEntriesMeta.mockImplementation(() => Promise.resolve(entries));
+      mockVaultIsUnlocked.mockResolvedValue(true);
+    }
   });
 
   it('says nothing when the vault is ready', async () => {

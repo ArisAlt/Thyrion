@@ -131,7 +131,47 @@ export const tests = [
     const entry = await app.invoke('vault_get_entry', { key: 'session:Access SW2' });
     assert.equal(entry.enable_secret, 'th1rd', 'the stored password is unchanged');
   }],
+
+  ['a wrong master password, then the right one, unlocks the vault when Credentials opens', async ({ app }) => {
+    // Reported: after a wrong password the right one didn't close the window.
+    await app.invoke('vault_lock');
+    await app.run((e) => {
+      const btn = document.querySelector('button[aria-label="Edit Access SW2"]');
+      btn.scrollIntoView();
+      return e.click(btn);
+    });
+    await app.waitFor(() => !!document.getElementById('new-session-modal-host-name-or-ip-address'), [], { what: 'the session editor' });
+    await app.run((e) => e.click([...document.querySelectorAll('[role="tab"]')].find((x) => /Credentials/.test(x.textContent))));
+    await unlockAfterAWrongPassword(app);
+    assert.equal(await app.invoke('vault_is_unlocked'), true);
+    // Escape where the user's focus is: in the editor.
+    await app.run((e) => e.key('Escape', document.getElementById('new-session-modal-host-name-or-ip-address')));
+    await app.waitFor(() => !document.getElementById('new-session-modal-host-name-or-ip-address'), [], { what: 'the editor to close' });
+  }],
+
+  ['a wrong master password, then the right one, unlocks the vault and the save carries on', async ({ app }) => {
+    await app.invoke('vault_lock');
+    await editEnablePassword(app, 'Access SW2', 'f1fth');
+    await unlockAfterAWrongPassword(app);
+    await app.waitFor(() => !document.getElementById('new-session-modal-enable-password'), [], { what: 'the editor to close', timeoutMs: 10000 });
+    const entry = await app.invoke('vault_get_entry', { key: 'session:Access SW2' });
+    assert.equal(entry.enable_secret, 'f1fth');
+  }],
 ];
+
+/** The unlock dialog: a wrong master password is refused, the right one
+ *  then unlocks and the dialog closes. */
+async function unlockAfterAWrongPassword(app) {
+  await app.waitFor(() => !!document.getElementById('vault-unlock-password'), [], { what: 'the unlock dialog' });
+  await app.run((e) => e.fill(document.getElementById('vault-unlock-password'), 'not-the-master'));
+  await sleep(50);
+  await clickInDialog(app, 'Unlock');
+  await app.waitFor(() => !!document.getElementById('vault-unlock-error'), [], { what: 'the wrong password to be refused' });
+  await app.run((e) => e.fill(document.getElementById('vault-unlock-password'), 'e2e-master'));
+  await sleep(50);
+  await clickInDialog(app, 'Unlock');
+  await app.waitFor(() => !document.getElementById('vault-unlock-password'), [], { what: 'the unlock dialog to close', timeoutMs: 10000 });
+}
 
 /** Opens a saved session's settings with its pencil, types an enable
  *  password on Credentials, and presses Save. */

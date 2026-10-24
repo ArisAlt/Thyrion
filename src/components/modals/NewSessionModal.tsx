@@ -325,9 +325,14 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
 
   const afterUnlock = async () => {
     const again = unlockFor === 'save';
+    // Unlocked in the same render that closes the window. Marked only once
+    // the entries had loaded, the window closed with the vault still
+    // "locked" in between, and opening Credentials with the vault locked
+    // asked again: after a wrong master password, the right one seemed not
+    // to close the window.
+    setVaultState('ready');
     setUnlockFor(null);
     try { setVaultEntries(await vaultListEntriesMeta()); } catch { /* listed on the next change */ }
-    setVaultState('ready');
     if (again) setResubmit(true);
   };
 
