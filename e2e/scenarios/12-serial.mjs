@@ -95,6 +95,30 @@ export const tests = [
     await app.waitForScreen(`you typed: ${lines.at(-1)}`);
   }],
 
+  ['a serial tab restored at startup leaves its line alone until Connect', async ({ app, dev, ctx }) => {
+    // The app started again with the tab in its saved layout, while the line
+    // is in use (here by the first app: a console script or another
+    // terminal in real life). Opening it at startup took it from them.
+    await sleep(500); // the layout is saved
+    const again = await ctx.launch({});
+    try {
+      await again.waitForTab('Console Cable', 'disconnected', { timeoutMs: 10000 });
+      await again.waitForScreen('was not reopened at startup');
+      assert.equal(await again.run(() => [...document.querySelectorAll('button')].some((b) => b.textContent === 'Connect')), true, 'a Connect button');
+      // The line is still the first app's: what it types gets there.
+      dev.clear();
+      await app.run((e) => e.focusTerminal());
+      await app.type('show clock');
+      await app.key('Enter');
+      await dev.waitForLine('show clock');
+      // Connect opens it, and here says it's busy rather than taking it.
+      await again.run((e) => e.click([...document.querySelectorAll('button')].find((b) => b.textContent === 'Connect')));
+      await again.waitForScreen(/Failed to open serial line[\s\S]*busy/i, { timeoutMs: 10000 });
+    } finally {
+      await again.stop();
+    }
+  }],
+
   ['pulling out the USB adapter shows the tab as disconnected', async ({ app, dev }) => {
     dev.unplug();
     await app.waitForTab('Console Cable', 'disconnected', { timeoutMs: 5000 });

@@ -705,6 +705,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   // disconnected -- no Reconnect button, and typing went nowhere (e2e suite
   // on a Windows runner). Only a reconnect clears it.
   const endedRef = useRef(false);
+  // A serial tab restored at startup: its line stays closed until Connect.
+  const deferredRef = useRef(!!tab.deferConnect);
   // The tab's broadcast channel, for a reconnect to put the session back on.
   const syncChannelRef = useRef(tab.syncChannel);
   syncChannelRef.current = tab.syncChannel;
@@ -1184,8 +1186,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       autoLoginSentRef.current = { user: false, password: false };
       commandRunRef.current = false; // a new connection logs in again
       setDetectedPasswordPrompt(null);
-      term.writeln('\r\n\x1b[33m[Thyrion: Reconnecting...]\x1b[0m');
-      onUpdateTab(tab.id, { status: 'connecting' });
+      term.writeln(deferredRef.current ? '\x1b[33m[Thyrion: Connecting...]\x1b[0m' : '\r\n\x1b[33m[Thyrion: Reconnecting...]\x1b[0m');
+      deferredRef.current = false;
+      onUpdateTab(tab.id, { status: 'connecting', deferConnect: false });
       startFresh();
     };
 
@@ -1242,6 +1245,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           reachedLiveRef.current = attachInfo.is_live;
           // Newer than everything above: a hang-up in it has the last word.
           flushHeld();
+        } else if (deferredRef.current) {
+          // Restored at startup: the line may be in use by another program.
+          attaching = false;
+          term.writeln(`\x1b[2m[Thyrion: ${tab.sessionName} was not reopened at startup, so its serial line stays free for whatever is using it. Connect opens it.]\x1b[0m`);
+          onUpdateTab(tab.id, { status: 'disconnected' });
         } else {
           attaching = false;
           startFresh();
@@ -1301,6 +1309,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         showLockNotice();
         return;
       }
+      // Not connected yet: nothing to send to, and nothing to hold for a
+      // session the user hasn't asked for.
+      if (deferredRef.current) return;
       const before = typedRef.current.submitted;
       typedRef.current = trackTypedInput(typedRef.current, data, Date.now());
       const sub = typedRef.current.submitted;
@@ -2155,8 +2166,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               </>
             ) : (
               <>
-                <span>Disconnected</span>
-                <button onClick={handleManualReconnect} className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-amber-950 text-meta">Reconnect</button>
+                <span>{tab.deferConnect ? 'Serial line not opened' : 'Disconnected'}</span>
+                <button onClick={handleManualReconnect} className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-amber-950 text-meta">{tab.deferConnect ? 'Connect' : 'Reconnect'}</button>
               </>
             )}
           </div>

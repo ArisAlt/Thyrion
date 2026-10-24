@@ -30,7 +30,7 @@ import { SettingsModal } from './components/modals/SettingsModal';
 import { placeName } from './services/sessionOrder';
 import { assignPanes, paneCount, placeInPane, samePanes, PANE_SLOTS, PaneSlots } from './services/paneLayout';
 import { fontSizeForKey, TERMINAL_FONT_MIN, TERMINAL_FONT_MAX, TERMINAL_FONT_DEFAULT } from './services/terminalFontKeys';
-import { saveLayout, loadLayout, clearLayout } from './services/layoutPersistence';
+import { saveLayout, loadLayout, clearLayout, opensAtStartup } from './services/layoutPersistence';
 import { 
   X, 
   Lock,
@@ -234,7 +234,8 @@ export const App: React.FC = () => {
         title: t.title,
         sessionName: t.sessionName,
         syncChannel: t.syncChannel,
-        status: 'live',
+        status: opensAtStartup(t.protocol) ? 'live' : 'disconnected',
+        ...(opensAtStartup(t.protocol) ? {} : { deferConnect: true }),
         freeTypeMode: false,
         activeHighlighting: true,
         hostname: t.hostname,
