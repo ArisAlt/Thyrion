@@ -101,6 +101,12 @@ impl NetTarget {
             if s.host_name.trim().is_empty() {
                 return None;
             }
+            // Raw has no port of its own to fall back on: connecting to port
+            // 0 failed with a bare network error. plink -load applies PuTTY's
+            // own rules to such a session, as before.
+            if !telnet && s.port_number == 0 {
+                return None;
+            }
             let echo = match s.extra.get("LocalEcho").map(|v| v.trim()) {
                 Some("0") => EchoSetting::On,
                 Some("1") => EchoSetting::Off,
@@ -109,7 +115,7 @@ impl NetTarget {
             let term_type = s.extra.get("TerminalType").map(|t| t.trim()).filter(|t| !t.is_empty()).unwrap_or("xterm");
             return Some(Self {
                 host: s.host_name.trim().to_string(),
-                port: if s.port_number == 0 { if telnet { 23 } else { 0 } } else { s.port_number },
+                port: if s.port_number == 0 { 23 } else { s.port_number },
                 telnet,
                 term_type: term_type.to_string(),
                 echo,
@@ -722,6 +728,14 @@ mod tests {
         assert!(!NetTarget::for_session(Some(&saved("raw", &[])), None).unwrap().telnet);
         assert_eq!(NetTarget::for_session(Some(&saved("telnet", &[("ProxyMethod", "5")])), None), None);
         assert_eq!(NetTarget::for_session(Some(&saved("ssh", &[])), None), None);
+    }
+
+    #[test]
+    fn a_saved_raw_session_with_no_port_is_left_to_plink() {
+        // Connected natively, it went to port 0.
+        let no_port = |protocol| putty_compat::sessions::PuttySession { port_number: 0, ..saved(protocol, &[]) };
+        assert_eq!(NetTarget::for_session(Some(&no_port("raw")), None), None);
+        assert_eq!(NetTarget::for_session(Some(&no_port("telnet")), None).unwrap().port, 23);
     }
 
     #[test]
