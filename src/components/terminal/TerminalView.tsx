@@ -1177,6 +1177,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     restartSessionRef.current = async () => {
       if (disposed) return;
       setHostKeyMismatch(null);
+      // Until the new session is there, keys are held for it (goLive), as
+      // on a first connect: sent now, they went to a closed session and
+      // were lost.
+      isLivePtyRef.current = false;
       await closeTerminalSession(tab.id);
       reopenSessionId(tab.id);
       if (disposed) return;
