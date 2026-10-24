@@ -40,6 +40,9 @@ export interface TerminalTab {
   /** Colour picked from the tab's menu (tabColors.ts id); overrides the
    *  saved session's colour. */
   color?: string;
+  /** Brought back at startup without connecting (a serial line: see
+   *  layoutPersistence.opensAtStartup); connects when the user asks. */
+  deferConnect?: boolean;
 }
 
 export interface TunnelEntry {

@@ -146,6 +146,12 @@ pub trait Transport: Send {
         true
     }
 
+    /// Whether a paced paste sends each line only once the device has
+    /// echoed the one before (a serial line: see session/paste.rs).
+    fn paste_waits_for_echo(&self) -> bool {
+        false
+    }
+
     /// Explicitly terminates the transport and child process.
     fn kill(&mut self) -> Result<()>;
 

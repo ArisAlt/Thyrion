@@ -25,3 +25,17 @@ export async function writeClipboard(text: string): Promise<void> {
   }
   await navigator.clipboard?.writeText(text);
 }
+
+/**
+ * A terminal selection as PuTTY copies it: each line without the spaces at
+ * its end (PuTTY's clipme(), for every line that isn't wrapped onto the
+ * next). xterm keeps spaces the device wrote, and a Cisco console writes
+ * some: lines of its own config (`default-router 10.10.10.1 `) and the
+ * padding of a line it redraws. Copied and pasted back, such a line took
+ * the space with it -- into a `username ... password` command, a password
+ * with a space on the end. A line xterm wrapped is already one line here.
+ */
+export function copiedText(selection: string): string {
+  return selection.replace(/ +(?=\r?\n|$)/g, '');
+}
+

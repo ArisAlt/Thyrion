@@ -4,6 +4,7 @@ import {
   loadLayout,
   clearLayout,
   SavedTab,
+  opensAtStartup,
 } from '../services/layoutPersistence';
 
 describe('Layout Persistence Service (R1-R3 Compliance)', () => {
@@ -75,5 +76,15 @@ describe('Layout Persistence Service (R1-R3 Compliance)', () => {
 
     clearLayout();
     expect(loadLayout()).toBeNull();
+  });
+});
+
+describe('opensAtStartup', () => {
+  it('leaves a restored serial tab closed, so it can\'t take a line another program is using', () => {
+    expect(opensAtStartup('Serial')).toBe(false);
+  });
+
+  it('still reconnects network sessions', () => {
+    for (const p of ['SSH', 'Telnet', 'RAW', 'Rlogin', undefined]) expect(opensAtStartup(p)).toBe(true);
   });
 });

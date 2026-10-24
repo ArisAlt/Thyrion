@@ -64,7 +64,7 @@ import { VaultUnlockDialog } from '../vault/VaultUnlockDialog';
 import { fatalHint, sshBannerHint } from '../../services/fatalHint';
 import { askPaste, needsPasteConfirm } from '../../services/pasteConfirm';
 import { terminalShortcut, keySequenceFor } from '../../services/shortcuts';
-import { readClipboard, writeClipboard } from '../../services/clipboard';
+import { readClipboard, writeClipboard, copiedText } from '../../services/clipboard';
 import { DEFAULT_TERMINAL_FONT, loadTerminalFont } from '../../themes/fonts';
 import {
   FileCode,
@@ -607,6 +607,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     terminalRef.current?.focus();
   };
 
+  /** Whether a multi-line paste goes line by line: when the session asks
+   *  for a delay, and always on a serial line, where the backend sends each
+   *  line once the device has echoed the last (a console overrun by a paste
+   *  sent flat out drops lines; see session/paste.rs). */
+  const isSerial = tab.protocol === 'Serial';
+  const pacedPaste = (text: string) =>
+    (pasteDelayRef.current > 0 || isSerial) && isLivePtyRef.current && isMultiLinePaste(text);
+
   /** Every paste goes through here: paced when the session asks for it. */
   const pasteText = async (text: string) => {
     if (!text) return;
@@ -615,14 +623,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       return;
     }
     const delay = pasteDelayRef.current;
-    if (delay > 0 && isMultiLinePaste(text)) {
+    if (pacedPaste(text)) {
       const total = text.replace(/[\r\n]+$/, '').split(/\r\n|\r|\n/).length;
       setPasteJob({ sent: 0, total });
       try {
         const sent = await pastePaced(tab.id, text, delay);
         addEventLog(sent < total
           ? `Paste cancelled after ${sent} of ${total} lines`
-          : `Pasted ${sent} lines, ${delay} ms apart`, sent < total ? 'warn' : 'info');
+          : isSerial ? `Pasted ${sent} lines, each after the last one's echo` : `Pasted ${sent} lines, ${delay} ms apart`,
+          sent < total ? 'warn' : 'info');
       } catch (e) {
         addEventLog(String(e), 'error');
       } finally {
@@ -636,7 +645,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   /** A paste the way the terminal itself sends one: paced when this session
    *  asks for it, otherwise through xterm (bracketed paste, line endings). */
   const deliverTypedPaste = async (text: string) => {
-    if (pasteDelayRef.current > 0 && isLivePtyRef.current && isMultiLinePaste(text)) {
+    if (pacedPaste(text)) {
       await pasteText(text);
       return;
     }
@@ -652,6 +661,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         text,
         target: tab.title,
         lineDelayMs: pasteDelayRef.current,
+        echoPaced: isSerial,
         // A password pasted at its prompt stays off the screen until asked.
         sensitive: !!detectedPasswordPrompt || classifyPasswordPrompt(recentOutputRef.current) !== null,
       });
@@ -673,8 +683,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     await confirmThenPaste(text, deliver);
   };
   // The listeners set up once per terminal reach the current versions here.
-  const pasteActionsRef = useRef({ confirmThenPaste, pasteFromClipboard, deliverTypedPaste });
-  pasteActionsRef.current = { confirmThenPaste, pasteFromClipboard, deliverTypedPaste };
+  const pasteActionsRef = useRef({ confirmThenPaste, pasteFromClipboard, deliverTypedPaste, pacedPaste });
+  pasteActionsRef.current = { confirmThenPaste, pasteFromClipboard, deliverTypedPaste, pacedPaste };
 
   // ---- Reconnect (T-016) ---------------------------------------------------
   // Restarts the session in this same terminal, like PuTTY's "Restart
@@ -695,6 +705,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   // disconnected -- no Reconnect button, and typing went nowhere (e2e suite
   // on a Windows runner). Only a reconnect clears it.
   const endedRef = useRef(false);
+  // A serial tab restored at startup: its line stays closed until Connect.
+  const deferredRef = useRef(!!tab.deferConnect);
   // The tab's broadcast channel, for a reconnect to put the session back on.
   const syncChannelRef = useRef(tab.syncChannel);
   syncChannelRef.current = tab.syncChannel;
@@ -1054,7 +1066,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     // PuTTY Classic: Copy on select
     term.onSelectionChange(() => {
       if (copyOnSelectRef.current) {
-        const selection = term.getSelection();
+        const selection = copiedText(term.getSelection());
         if (selection && selection.length > 0) void writeClipboard(selection);
       }
     });
@@ -1174,8 +1186,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       autoLoginSentRef.current = { user: false, password: false };
       commandRunRef.current = false; // a new connection logs in again
       setDetectedPasswordPrompt(null);
-      term.writeln('\r\n\x1b[33m[Thyrion: Reconnecting...]\x1b[0m');
-      onUpdateTab(tab.id, { status: 'connecting' });
+      term.writeln(deferredRef.current ? '\x1b[33m[Thyrion: Connecting...]\x1b[0m' : '\r\n\x1b[33m[Thyrion: Reconnecting...]\x1b[0m');
+      deferredRef.current = false;
+      onUpdateTab(tab.id, { status: 'connecting', deferConnect: false });
       startFresh();
     };
 
@@ -1232,6 +1245,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           reachedLiveRef.current = attachInfo.is_live;
           // Newer than everything above: a hang-up in it has the last word.
           flushHeld();
+        } else if (deferredRef.current) {
+          // Restored at startup: the line may be in use by another program.
+          attaching = false;
+          term.writeln(`\x1b[2m[Thyrion: ${tab.sessionName} was not reopened at startup, so its serial line stays free for whatever is using it. Connect opens it.]\x1b[0m`);
+          onUpdateTab(tab.id, { status: 'disconnected' });
         } else {
           attaching = false;
           startFresh();
@@ -1246,7 +1264,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const pasteTarget = containerRef.current;
     const onPasteCapture = (e: ClipboardEvent) => {
       const text = e.clipboardData?.getData('text/plain') ?? '';
-      const paced = pasteDelayRef.current > 0 && isLivePtyRef.current && isMultiLinePaste(text);
+      const paced = pasteActionsRef.current.pacedPaste(text);
       if (paced || needsPasteConfirm(text)) {
         e.preventDefault();
         e.stopPropagation();
@@ -1275,7 +1293,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       if (action === 'sendEnable') {
         requestEnableRef.current();
       } else if (action === 'copy') {
-        const selection = term.getSelection();
+        const selection = copiedText(term.getSelection());
         if (selection) void writeClipboard(selection);
       } else if (action === 'selectAll') {
         term.selectAll();
@@ -1291,6 +1309,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         showLockNotice();
         return;
       }
+      // Not connected yet: nothing to send to, and nothing to hold for a
+      // session the user hasn't asked for.
+      if (deferredRef.current) return;
       const before = typedRef.current.submitted;
       typedRef.current = trackTypedInput(typedRef.current, data, Date.now());
       const sub = typedRef.current.submitted;
@@ -1580,7 +1601,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   };
 
   const handleCopy = () => {
-    const selection = terminalRef.current?.getSelection();
+    const selection = copiedText(terminalRef.current?.getSelection() ?? '');
     if (selection) void writeClipboard(selection);
     setContextMenu(null);
   };
@@ -2145,8 +2166,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               </>
             ) : (
               <>
-                <span>Disconnected</span>
-                <button onClick={handleManualReconnect} className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-amber-950 text-meta">Reconnect</button>
+                <span>{tab.deferConnect ? 'Serial line not opened' : 'Disconnected'}</span>
+                <button onClick={handleManualReconnect} className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-amber-950 text-meta">{tab.deferConnect ? 'Connect' : 'Reconnect'}</button>
               </>
             )}
           </div>

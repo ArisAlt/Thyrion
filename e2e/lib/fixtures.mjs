@@ -9,6 +9,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { isWindows, writeRegistrySession } from './windows.mjs';
 
 const IAC = 255, DONT = 254, DO = 253, WONT = 252, WILL = 251, SB = 250, SE = 240;
+const TTYPE = 24, TTYPE_IS = 0, TTYPE_SEND = 1;
 const ECHO = 1, SGA = 3, NAWS = 31;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -41,6 +42,7 @@ export async function startConsole({ name = 'R1', negotiate = true, host = '127.
     received: Buffer.alloc(0), // data bytes, telnet commands removed
     commands: [],              // [verb, option] the client sent
     naws: [],                  // window sizes the client reported
+    ttype: null,               // the terminal type it sent, as sent
     lines: [],                 // lines the console accepted
     connections: 0,
     open: 0,
@@ -96,6 +98,9 @@ export async function startConsole({ name = 'R1', negotiate = true, host = '127.
         const rows = [];
         for (let i = 1; i <= n; i++) rows.push(`line ${String(i).padStart(6, '0')} of ${n} ${'x'.repeat(40)}`);
         out = rows.join('\r\n') + `\r\nEND-OF-OUTPUT ${n}\r\n`;
+      } else if (cmd === 'show trailing') {
+        // As IOS prints some config lines: with a space on the end.
+        out = 'ip dhcp pool LOCAL \r\n default-router 10.10.10.1 \r\nEND-TRAILING\r\n';
       } else if (cmd === 'show utf8') {
         out = 'Καλημέρα κόσμε ✓ — ψ\r\n';
       } else if (cmd === 'show size') {
@@ -156,6 +161,8 @@ export async function startConsole({ name = 'R1', negotiate = true, host = '127.
           else state = 'data';
         } else if (state === 'opt') {
           con.commands.push([{ [WILL]: 'WILL', [WONT]: 'WONT', [DO]: 'DO', [DONT]: 'DONT' }[verb], b]);
+          // A client that offers its terminal type is asked for it, as IOS does.
+          if (negotiate && verb === WILL && b === TTYPE) sock.write(Buffer.from([IAC, DO, TTYPE, IAC, SB, TTYPE, TTYPE_SEND, IAC, SE]));
           state = 'data';
         } else if (state === 'sb') {
           if (b === IAC) state = 'sb-iac';
@@ -165,6 +172,7 @@ export async function startConsole({ name = 'R1', negotiate = true, host = '127.
             if (sb[0] === NAWS && sb.length >= 5) {
               con.naws.push({ cols: (sb[1] << 8) | sb[2], rows: (sb[3] << 8) | sb[4] });
             }
+            if (sb[0] === TTYPE && sb[1] === TTYPE_IS) con.ttype = Buffer.from(sb.slice(2)).toString('latin1');
             state = 'data';
           } else { sb.push(b); state = 'sb'; }
         }

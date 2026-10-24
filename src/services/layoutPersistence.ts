@@ -24,6 +24,17 @@ export interface LayoutState {
   timestamp: number;
 }
 
+/**
+ * Whether a tab brought back from the saved layout connects by itself at
+ * startup. A serial tab doesn't: its line is a local device only one
+ * program can have open, and a restored tab that took it at startup took
+ * it from whatever was using it (another terminal, a script on the same
+ * console). It waits for Connect instead. Network sessions reconnect.
+ */
+export function opensAtStartup(protocol?: string): boolean {
+  return protocol !== 'Serial';
+}
+
 const STORAGE_KEY = 'plinky_layout_state_v1';
 const CURRENT_SCHEMA_VERSION = 1;
 

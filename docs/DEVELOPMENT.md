@@ -14,7 +14,12 @@ connected by Thyrion (`transport/telnet.rs`): through plink.exe on Windows they
 had no local echo, a fixed 80x24 window and lost all input after a Ctrl+Z. A
 saved telnet session that uses a proxy still goes through plink, and
 `THYRION_TELNET_VIA_PLINK=1` sends them all through plink as before. Serial
-consoles use a native serial transport so they can send Break.
+consoles use a native serial transport so they can send Break. On Linux it
+sets the line's low_latency flag while open (FTDI adapters then pass on what
+they receive after 1 ms instead of 16), and a multi-line paste on a serial line
+sends each line once the device has echoed the last (`session/paste.rs`). A
+serial tab brought back from the saved layout at startup doesn't open its line
+until Connect: only one program can have it, and it may be in use.
 
 Thyrion reads and writes PuTTY's own saved sessions (`~/.putty/sessions` or
 `PUTTYDIR` on Linux, the registry on Windows) and adds tabs, split layouts, a

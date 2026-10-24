@@ -327,7 +327,10 @@ impl Telnet {
     fn subnegotiation(&mut self, reply: &mut Vec<u8>) {
         if self.sb.first() == Some(&OPT_TTYPE) && self.sb.get(1) == Some(&TTYPE_SEND) && self.ours[OPT_TTYPE as usize] == Opt::On {
             reply.extend_from_slice(&[IAC, SB, OPT_TTYPE, TTYPE_IS]);
-            reply.extend(self.term_type.bytes().filter(|&b| b != IAC));
+            // In capitals, as PuTTY sends it (telnet.c; RFC 1091 asks for
+            // upper case): a C891F's `show terminal` read "XTERM" from PuTTY
+            // and "xterm" from Thyrion.
+            reply.extend(self.term_type.bytes().filter(|&b| b != IAC).map(|b| b.to_ascii_uppercase()));
             reply.extend_from_slice(&[IAC, SE]);
         }
     }
@@ -658,12 +661,12 @@ mod tests {
     }
 
     #[test]
-    fn terminal_type_is_sent_when_asked() {
+    fn terminal_type_is_sent_when_asked_in_capitals_like_putty() {
         let mut t = Telnet::new(80, 24, "xterm-256color");
         t.opening();
         let (_, reply) = t.receive(&[IAC, DO, OPT_TTYPE, IAC, SB, OPT_TTYPE, TTYPE_SEND, IAC, SE]);
         let mut want = vec![IAC, SB, OPT_TTYPE, TTYPE_IS];
-        want.extend_from_slice(b"xterm-256color");
+        want.extend_from_slice(b"XTERM-256COLOR");
         want.extend_from_slice(&[IAC, SE]);
         assert_eq!(reply, want);
     }

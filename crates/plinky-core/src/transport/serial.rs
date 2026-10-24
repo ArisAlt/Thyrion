@@ -93,7 +93,10 @@ impl SerialConfig {
 pub struct SerialTransport {
     /// Kept for break control; reads and writes use their own clones.
     #[cfg(not(windows))]
-    port: Box<dyn SerialPort>,
+    port: serialport::TTYPort,
+    /// The line's own low_latency setting, put back on close.
+    #[cfg(target_os = "linux")]
+    low_latency: Option<linux::LowLatency>,
     /// Shared with the reader and writer threads; the line closes when the
     /// last of the three lets go.
     #[cfg(windows)]
@@ -122,8 +125,10 @@ impl SerialTransport {
             .stop_bits(config.stop_bits)
             .flow_control(config.flow_control)
             .timeout(Duration::from_millis(100))
-            .open()
+            .open_native()
             .map_err(open_err)?;
+        #[cfg(target_os = "linux")]
+        let low_latency = linux::LowLatency::set(std::os::fd::AsRawFd::as_raw_fd(&port));
         let mut reader = port.try_clone().map_err(open_err)?;
         let mut writer = port.try_clone().map_err(open_err)?;
 
@@ -172,7 +177,13 @@ impl SerialTransport {
             }
         });
 
-        Ok(Self { port, writer_tx, alive })
+        Ok(Self {
+            port,
+            #[cfg(target_os = "linux")]
+            low_latency,
+            writer_tx,
+            alive,
+        })
     }
 
     /// As on Unix, but on a line opened for overlapped I/O, the way PuTTY
@@ -259,6 +270,10 @@ impl Transport for SerialTransport {
             .map_err(|_| PlinkyError::ProcessError("Serial line is closed".into()))
     }
 
+    fn paste_waits_for_echo(&self) -> bool {
+        true
+    }
+
     fn resize(&mut self, _cols: u16, _rows: u16) -> Result<()> {
         // A serial line has no window size to report.
         Ok(())
@@ -269,6 +284,9 @@ impl Transport for SerialTransport {
         // Windows); the port itself
         // closes when the transport and both threads' clones are dropped.
         self.alive.store(false, Ordering::Relaxed);
+        // Here too, not only on drop: the app's exit kills sessions without
+        // dropping them.
+        self.restore_line();
         Ok(())
     }
 
@@ -282,6 +300,92 @@ impl Drop for SerialTransport {
     /// transport dropped un-killed would keep the line open.
     fn drop(&mut self) {
         self.alive.store(false, Ordering::Relaxed);
+        self.restore_line();
+    }
+}
+
+impl SerialTransport {
+    /// Puts back the line settings changed on open. A killed app (SIGKILL)
+    /// leaves low_latency on until the adapter is plugged in again.
+    fn restore_line(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let Some(low_latency) = self.low_latency.take() {
+            low_latency.restore(std::os::fd::AsRawFd::as_raw_fd(&self.port));
+        }
+    }
+}
+
+/// USB serial adapters hold what they receive until their buffer fills or a
+/// latency timer runs out: 16 ms by default on FTDI's. Every echo waited up
+/// to 16 ms, and a prompt split across two USB packets waited twice. Linux's
+/// low_latency flag (what `setserial low_latency` sets; no root needed)
+/// takes FTDI's timer to 1 ms. PuTTY leaves it alone. Measured on a Cisco
+/// C891F at 9600 baud through an FT232R: key to echo 14 -> 7 ms, Enter to
+/// prompt 30 -> 15 ms. Lines that don't have the flag (a pty, CDC ACM) just
+/// open without it.
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::os::fd::RawFd;
+
+    const ASYNC_LOW_LATENCY: libc::c_int = 1 << 13;
+
+    /// `struct serial_struct` (linux/serial.h).
+    #[repr(C)]
+    struct SerialStruct {
+        kind: libc::c_int,
+        line: libc::c_int,
+        port: libc::c_uint,
+        irq: libc::c_int,
+        flags: libc::c_int,
+        xmit_fifo_size: libc::c_int,
+        custom_divisor: libc::c_int,
+        baud_base: libc::c_int,
+        close_delay: libc::c_ushort,
+        io_type: libc::c_char,
+        reserved_char: [libc::c_char; 1],
+        hub6: libc::c_int,
+        closing_wait: libc::c_ushort,
+        closing_wait2: libc::c_ushort,
+        iomem_base: *mut libc::c_uchar,
+        iomem_reg_shift: libc::c_ushort,
+        port_high: libc::c_uint,
+        iomap_base: libc::c_ulong,
+    }
+
+    fn get(fd: RawFd) -> Option<SerialStruct> {
+        let mut ss: SerialStruct = unsafe { std::mem::zeroed() };
+        (unsafe { libc::ioctl(fd, libc::TIOCGSERIAL as _, &mut ss) } == 0).then_some(ss)
+    }
+
+    fn set_flag(fd: RawFd, on: bool) -> bool {
+        let Some(mut ss) = get(fd) else { return false };
+        ss.flags = if on { ss.flags | ASYNC_LOW_LATENCY } else { ss.flags & !ASYNC_LOW_LATENCY };
+        unsafe { libc::ioctl(fd, libc::TIOCSSERIAL as _, &ss) == 0 }
+    }
+
+    /// The flag was turned on here, and is turned off again on close.
+    #[derive(Debug)]
+    pub struct LowLatency;
+
+    impl LowLatency {
+        /// Turns the flag on, if the line has it and it is off.
+        pub fn set(fd: RawFd) -> Option<Self> {
+            let ss = get(fd)?;
+            if ss.flags & ASYNC_LOW_LATENCY != 0 {
+                return None;
+            }
+            set_flag(fd, true).then_some(Self)
+        }
+
+        pub fn restore(self, fd: RawFd) {
+            // An adapter already unplugged has nothing to restore.
+            set_flag(fd, false);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn is_set(fd: RawFd) -> Option<bool> {
+        get(fd).map(|ss| ss.flags & ASYNC_LOW_LATENCY != 0)
     }
 }
 
@@ -763,5 +867,279 @@ mod tests {
         assert!(is_phantom_uart(dir.path(), "/dev/ttyS1"), "type 0 is an empty slot");
         assert!(!is_phantom_uart(dir.path(), "/dev/ttyUSB0"));
         assert!(!is_phantom_uart(dir.path(), "COM3"));
+    }
+}
+
+/// A serial line made of a pty: the session opens its far end as its device,
+/// the test plays the console on the near end.
+#[cfg(all(test, target_os = "linux"))]
+mod line_tests {
+    use super::*;
+    use crate::session::manager::SessionRegistry;
+    use std::collections::VecDeque;
+    use std::fs::File;
+    use std::os::fd::FromRawFd;
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    fn pty() -> (File, String) {
+        unsafe {
+            let m = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            assert!(m >= 0, "{}", std::io::Error::last_os_error());
+            assert_eq!(libc::grantpt(m), 0);
+            assert_eq!(libc::unlockpt(m), 0);
+            let mut name = [0 as libc::c_char; 128];
+            assert_eq!(libc::ptsname_r(m, name.as_mut_ptr(), name.len()), 0);
+            let path = std::ffi::CStr::from_ptr(name.as_ptr()).to_string_lossy().into_owned();
+            (File::from_raw_fd(m), path)
+        }
+    }
+
+    fn config(line: &str) -> SerialConfig {
+        SerialConfig::from_putty_keys(
+            &[("SerialLine", line), ("SerialFlowControl", "0")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn an_echo_comes_back_as_soon_as_the_console_sends_it() {
+        // Nothing between the key and the line, or the line and the session,
+        // may wait for a timer, a poll interval or a fuller buffer. A pty
+        // has no baud rate: every round trip should take well under 1 ms.
+        let (mut console, line) = pty();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut t = SerialTransport::open(&config(&line), tx).expect("a pty opens as a serial line");
+        let mut echo = console.try_clone().unwrap();
+        std::thread::spawn(move || {
+            let mut b = [0u8; 64];
+            while let Ok(n @ 1..) = console.read(&mut b) {
+                let _ = echo.write_all(&b[..n]);
+            }
+        });
+        let mut took = Vec::new();
+        for key in b"show version".iter() {
+            let started = Instant::now();
+            t.write(&[*key]).unwrap();
+            let got = loop {
+                match rx.try_recv() {
+                    Ok(b) => break b,
+                    Err(_) if started.elapsed() > Duration::from_secs(2) => panic!("no echo"),
+                    Err(_) => std::thread::yield_now(),
+                }
+            };
+            assert_eq!(got, [*key]);
+            took.push(started.elapsed());
+        }
+        took.sort();
+        assert!(took[took.len() / 2] < Duration::from_millis(5), "median round trip {:?}", took[took.len() / 2]);
+        assert!(took[took.len() - 1] < Duration::from_millis(50), "slowest round trip {:?}", took[took.len() - 1]);
+    }
+
+    #[test]
+    fn a_line_without_the_low_latency_flag_still_opens() {
+        let (_console, line) = pty();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let t = SerialTransport::open(&config(&line), tx).unwrap();
+        assert!(t.low_latency.is_none(), "a pty has no such flag");
+    }
+
+    /// A router's console: what arrives goes into a small input buffer
+    /// (what doesn't fit is lost), is handled at ~1 ms a byte, echoed, and
+    /// Enter prints the prompt. With `logging`, a log message goes out as
+    /// each line starts to arrive, line feeds and all. Only the first
+    /// `echoed` lines are echoed; the rest are taken in silence. Returns the
+    /// lines it received.
+    fn slow_console(console: File, logging: bool, echoed: usize) -> Arc<Mutex<Vec<String>>> {
+        const BUFFER: usize = 64;
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let pending = Arc::new(Mutex::new(VecDeque::<u8>::new()));
+        let (mut input, mut output) = (console.try_clone().unwrap(), console);
+        let mut log = output.try_clone().unwrap();
+        let fill = pending.clone();
+        std::thread::spawn(move || {
+            let mut b = [0u8; 4096];
+            let mut line_start = true;
+            while let Ok(n @ 1..) = input.read(&mut b) {
+                let mut q = fill.lock().unwrap();
+                for &c in &b[..n] {
+                    if logging && line_start {
+                        let _ = log.write_all(b"\r\n*Oct 23 19:40:01: %LINK-3-UPDOWN: Interface Gi7, changed state to up\r\n");
+                    }
+                    line_start = c == b'\r';
+                    if q.len() < BUFFER {
+                        q.push_back(c);
+                    }
+                }
+            }
+        });
+        let seen = lines.clone();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            loop {
+                std::thread::sleep(Duration::from_millis(1));
+                let Some(c) = pending.lock().unwrap().pop_front() else { continue };
+                let silent = seen.lock().unwrap().len() >= echoed;
+                let shown = if c == b'\r' {
+                    seen.lock().unwrap().push(std::mem::take(&mut line));
+                    b"\r\nR1#".to_vec()
+                } else {
+                    line.push(c as char);
+                    vec![c]
+                };
+                if silent {
+                    continue;
+                }
+                if output.write_all(&shown).is_err() {
+                    return;
+                }
+            }
+        });
+        lines
+    }
+
+    fn config_text() -> (String, Vec<String>) {
+        let lines: Vec<String> = (0..20).map(|i| format!("interface GigabitEthernet0/{i:<2} description e2e")).collect();
+        (lines.iter().map(|l| format!("{l}\n")).collect(), lines)
+    }
+
+    async fn wait_for(lines: &Mutex<Vec<String>>, n: usize) {
+        let started = Instant::now();
+        while lines.lock().unwrap().len() < n && started.elapsed() < Duration::from_secs(10) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_paste_sent_flat_out_overruns_a_slow_console() {
+        // What the fix below is measured against: PuTTY sends a paste as
+        // fast as the line takes it, and a console that can't keep up drops
+        // what it can't hold.
+        let (console, line) = pty();
+        let got = slow_console(console, false, usize::MAX);
+        let registry = SessionRegistry::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        registry.create_serial_session("s", "R1", &config(&line), None, tx).unwrap();
+        let (text, _) = config_text();
+        registry.write_input("s", text.replace('\n', "\r").as_bytes()).unwrap();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let got = got.lock().unwrap().clone();
+        assert!(got.len() < 20, "every line made it: {got:?}");
+        let _ = registry.close_session("s");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_paced_paste_waits_for_each_line_to_be_echoed() {
+        let (console, line) = pty();
+        let got = slow_console(console, false, usize::MAX);
+        let registry = SessionRegistry::new();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        // Something has to read the session's output, as the page does.
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        registry.create_serial_session("s", "R1", &config(&line), None, tx).unwrap();
+        let (text, want) = config_text();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let started = Instant::now();
+        let sent = registry.paste_paced("s", &text, Duration::ZERO, cancel, |_, _| {}).await.unwrap();
+        assert_eq!(sent, 20);
+        wait_for(&got, 20).await;
+        assert_eq!(*got.lock().unwrap(), want);
+        // ~37 bytes a line at 1 ms each: paced by the echo, not by timeouts.
+        assert!(started.elapsed() < Duration::from_secs(3), "took {:?}", started.elapsed());
+        let _ = registry.close_session("s");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_log_message_during_a_paced_paste_is_not_taken_for_the_echo() {
+        // Its line feeds come before the line's echo. Counting any line feed
+        // as the echo sent the next line into a full buffer.
+        let (console, line) = pty();
+        let got = slow_console(console, true, usize::MAX);
+        let registry = SessionRegistry::new();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        registry.create_serial_session("s", "R1", &config(&line), None, tx).unwrap();
+        let (text, want) = config_text();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let started = Instant::now();
+        registry.paste_paced("s", &text, Duration::ZERO, cancel, |_, _| {}).await.unwrap();
+        wait_for(&got, 20).await;
+        assert_eq!(*got.lock().unwrap(), want);
+        assert!(started.elapsed() < Duration::from_secs(3), "took {:?}", started.elapsed());
+        let _ = registry.close_session("s");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_line_that_is_never_echoed_waits_about_as_long_as_an_echoed_one() {
+        // Once a paste has seen a few echoes, a line with none (a password,
+        // a console that stopped echoing) waits their median, not 1 s.
+        let (console, line) = pty();
+        let got = slow_console(console, false, 5);
+        let registry = SessionRegistry::new();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        registry.create_serial_session("s", "R1", &config(&line), None, tx).unwrap();
+        let (text, want) = config_text();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let started = Instant::now();
+        registry.paste_paced("s", &text, Duration::ZERO, cancel, |_, _| {}).await.unwrap();
+        // 15 silent lines at ~40 ms each, not 15 s.
+        assert!(started.elapsed() < Duration::from_secs(4), "took {:?}", started.elapsed());
+        wait_for(&got, 20).await;
+        assert_eq!(*got.lock().unwrap(), want);
+        let _ = registry.close_session("s");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_paced_paste_to_a_console_that_echoes_nothing_still_goes() {
+        let (mut console, line) = pty();
+        let got = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let into = got.clone();
+        std::thread::spawn(move || {
+            let mut b = [0u8; 4096];
+            while let Ok(n @ 1..) = console.read(&mut b) {
+                into.lock().unwrap().extend_from_slice(&b[..n]);
+            }
+        });
+        let registry = SessionRegistry::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        registry.create_serial_session("s", "R1", &config(&line), None, tx).unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let started = Instant::now();
+        let sent = registry.paste_paced("s", "a\nb\nc", Duration::ZERO, cancel, |_, _| {}).await.unwrap();
+        assert_eq!(sent, 3);
+        // Two lines waited out their echo timeouts (~1 s each).
+        assert!(started.elapsed() >= Duration::from_millis(1900), "took {:?}", started.elapsed());
+        assert!(started.elapsed() < Duration::from_secs(4), "took {:?}", started.elapsed());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(*got.lock().unwrap(), b"a\rb\rc");
+        let _ = registry.close_session("s");
+    }
+
+    /// On a real USB adapter: THYRION_TEST_SERIAL=/dev/ttyUSB0 cargo test
+    /// -p plinky-core -- --ignored low_latency. FTDI's take the flag; others
+    /// may not have it.
+    #[test]
+    #[ignore = "needs a USB serial adapter (THYRION_TEST_SERIAL)"]
+    fn low_latency_is_on_while_the_line_is_open_and_put_back_after() {
+        let line = std::env::var("THYRION_TEST_SERIAL").expect("THYRION_TEST_SERIAL");
+        let check = |line: &str| {
+            let f = std::fs::OpenOptions::new().read(true).write(true).open(line).unwrap();
+            linux::is_set(std::os::fd::AsRawFd::as_raw_fd(&f))
+        };
+        assert_eq!(check(&line), Some(false), "the adapter starts without it");
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let t = SerialTransport::open(&config(&line), tx).unwrap();
+        assert!(t.low_latency.is_some());
+        assert_eq!(linux::is_set(std::os::fd::AsRawFd::as_raw_fd(&t.port)), Some(true));
+        drop(t);
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(check(&line), Some(false), "put back on close");
+        // The app's exit kills sessions without dropping them.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut t = SerialTransport::open(&config(&line), tx).unwrap();
+        t.kill().unwrap();
+        assert_eq!(check(&line), Some(false), "put back on kill");
+        drop(t);
     }
 }

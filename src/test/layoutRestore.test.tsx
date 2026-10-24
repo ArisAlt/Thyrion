@@ -19,4 +19,18 @@ describe('starting the app', () => {
     expect(ids).toEqual(['R1', 'R2']);
     expect(document.querySelector('[data-tab-active="true"]')?.getAttribute('data-tab-id')).toBe('R2');
   });
+
+  it('brings back a serial tab without opening its line, with a Connect button', async () => {
+    const tab = (id: string, protocol: string) => ({ id, title: id, sessionName: id, syncChannel: 'none', hostname: '', port: 0, protocol });
+    localStorage.setItem('plinky_layout_state_v1', JSON.stringify({
+      schema_version: 1, layoutMode: 'single', activeTabId: 'Console',
+      tabs: [tab('Console', 'Serial'), tab('R1', 'Telnet')], timestamp: Date.now(),
+    }));
+    render(<App />);
+    await screen.findAllByText('Edge Gateway Router'); // startup done
+    await act(async () => { await new Promise(r => setTimeout(r, 50)); });
+    expect(await screen.findByText('Serial line not opened')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Connect' })).toBeTruthy();
+  });
 });
+
