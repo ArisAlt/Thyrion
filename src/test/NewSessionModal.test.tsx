@@ -1285,6 +1285,24 @@ describe('saving with the vault locked (or not there yet), without unlocking it'
     expect(mockVaultSetEntry).not.toHaveBeenCalled();
   });
 
+  it('"Save without the password" can\'t be pressed while the unlock is under way', async () => {
+    const { onSave } = await newSessionWithPassword();
+    let finish!: () => void;
+    mockVaultUnlock.mockImplementationOnce(() => new Promise<boolean>(r => { finish = () => r(true); }));
+    fireEvent.change(screen.getByLabelText('Master password'), { target: { value: 'm4ster' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Unlock' }));
+    await waitFor(() => expect(mockVaultUnlock).toHaveBeenCalled());
+    const skip = screen.getByRole('button', { name: 'Save without the password' });
+    expect(skip).toBeDisabled();
+    fireEvent.click(skip);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onSave).not.toHaveBeenCalled();
+    mockVaultIsUnlocked.mockResolvedValue(true);
+    finish();
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(mockVaultSetEntry).toHaveBeenCalledWith(expect.objectContaining({ secret: 's3cret' }));
+  });
+
   it('unlocking instead stores both passwords and saves', async () => {
     const { onSave } = await newSessionWithPassword();
     mockVaultIsUnlocked.mockResolvedValue(true);
