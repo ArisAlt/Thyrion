@@ -294,6 +294,22 @@ pub fn stop(app: &AppHandle, registry: &SessionRegistry, session_id: &str) {
 mod tests {
     use super::*;
 
+    /// The helper's own tests (scripting/test_thyrion.py): command() against
+    /// a stand-in Cisco IOS. Skipped where there is no Python.
+    #[test]
+    fn the_python_helper_s_tests_pass() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripting");
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let out = match std::process::Command::new(python).args(["-m", "unittest", "test_thyrion"]).current_dir(&dir).output() {
+            Ok(out) => out,
+            Err(e) => {
+                eprintln!("skipped: no {python} ({e})");
+                return;
+            }
+        };
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_appimage_s_own_folders_are_left_out_of_a_script_s_paths() {
