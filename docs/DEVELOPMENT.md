@@ -21,6 +21,17 @@ sends each line once the device has echoed the last (`session/paste.rs`). A
 serial tab brought back from the saved layout at startup doesn't open its line
 until Connect: only one program can have it, and it may be in use.
 
+Every paste, whether from the keys, the menu, a right click or a middle click,
+goes through one path in `TerminalView.tsx` (`pasteFromClipboard` →
+`confirmThenPaste`): the paste window, serial echo pacing and line endings. A
+middle click pastes the clipboard on Linux too, not the X primary selection,
+and its press is stopped before the webview sees it, so WebKitGTK doesn't
+paste the selection a second time (`services/middleClickPaste.ts`; Settings >
+Mouse & Clipboard turns it off). Global Settings is split into tabs grouped as
+PuTTY's Category tree groups its options (`SettingsModal.tsx`); every panel
+stays mounted while hidden, so the e2e tests can still find the `settings-*`
+ids, but they click a panel's tab (`settings-tab-<name>`) before using it.
+
 Thyrion reads and writes PuTTY's own saved sessions (`~/.putty/sessions` or
 `PUTTYDIR` on Linux, the registry on Windows) and adds tabs, split layouts, a
 dual-pane file browser, an encrypted credential vault, broadcast input

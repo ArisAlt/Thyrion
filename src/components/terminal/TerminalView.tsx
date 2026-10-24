@@ -63,6 +63,7 @@ import { STATUS_DOT, STATUS_TEXT } from '../../services/sessionStatus';
 import { VaultUnlockDialog } from '../vault/VaultUnlockDialog';
 import { fatalHint, sshBannerHint } from '../../services/fatalHint';
 import { askPaste, needsPasteConfirm } from '../../services/pasteConfirm';
+import { getMiddleClickPaste } from '../../services/middleClickPaste';
 import { terminalShortcut, keySequenceFor } from '../../services/shortcuts';
 import { readClipboard, writeClipboard, copiedText } from '../../services/clipboard';
 import { DEFAULT_TERMINAL_FONT, loadTerminalFont } from '../../themes/fonts';
@@ -1262,7 +1263,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     // pastes, take it here (capture phase, before xterm); otherwise xterm
     // pastes as usual (bracketed paste and all).
     const pasteTarget = containerRef.current;
+    // Until when a paste event is the webview's own middle-click paste of
+    // one we already sent (middleClickPaste.ts): dropped, not sent twice.
+    let swallowPasteUntil = 0;
     const onPasteCapture = (e: ClipboardEvent) => {
+      if (Date.now() < swallowPasteUntil) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
       const text = e.clipboardData?.getData('text/plain') ?? '';
       const paced = pasteActionsRef.current.pacedPaste(text);
       if (paced || needsPasteConfirm(text)) {
@@ -1273,6 +1282,43 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
     };
     pasteTarget?.addEventListener('paste', onPasteCapture, true);
+
+    // Middle click pastes the clipboard, as PuTTY's does, through the same
+    // path as the paste keys. Taken before xterm and the webview: stopping
+    // the press keeps WebView2 from starting autoscroll and WebKitGTK from
+    // pasting the X selection as well. A program that asked for the mouse
+    // (vim with mouse=a) gets the click instead, unless Shift is held, as
+    // in PuTTY.
+    let middlePressed = false;
+    const takesMiddleClick = (e: MouseEvent) =>
+      e.button === 1 && getMiddleClickPaste() && !!(e.target as Element | null)?.closest?.('.xterm') &&
+      (e.shiftKey || term.modes.mouseTrackingMode === 'none');
+    const onMiddleDown = (e: MouseEvent) => {
+      middlePressed = takesMiddleClick(e);
+      if (!middlePressed) return;
+      e.preventDefault();
+      e.stopPropagation();
+      swallowPasteUntil = Date.now() + 1000;
+    };
+    const onMiddleUp = (e: MouseEvent) => {
+      if (e.button !== 1 || !middlePressed) return;
+      middlePressed = false;
+      e.preventDefault();
+      e.stopPropagation();
+      swallowPasteUntil = Date.now() + 500;
+      term.focus();
+      void pasteActionsRef.current.pasteFromClipboard(t => pasteActionsRef.current.deliverTypedPaste(t));
+    };
+    // The click and auxclick after it: nothing else should act on them.
+    const onMiddleClick = (e: MouseEvent) => {
+      if (e.button === 1 && Date.now() < swallowPasteUntil) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    pasteTarget?.addEventListener('mousedown', onMiddleDown, true);
+    pasteTarget?.addEventListener('mouseup', onMiddleUp, true);
+    pasteTarget?.addEventListener('auxclick', onMiddleClick, true);
 
     // Copy, paste and select all (shortcuts.ts). Handled here, not left to
     // the webview: WebKitGTK and WebView2 disagree on which of these keys
@@ -1405,6 +1451,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       restartSessionRef.current = null;
       unlistenConnected?.();
       pasteTarget?.removeEventListener('paste', onPasteCapture, true);
+      pasteTarget?.removeEventListener('mousedown', onMiddleDown, true);
+      pasteTarget?.removeEventListener('mouseup', onMiddleUp, true);
+      pasteTarget?.removeEventListener('auxclick', onMiddleClick, true);
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('resize', handleResize);
       if (resizeObserver) {
