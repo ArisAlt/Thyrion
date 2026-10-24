@@ -91,6 +91,12 @@ export const tests = [
     await app.waitForScreen('R1>');
   }],
 
+  ['the terminal type goes in capitals, like PuTTY', async ({ r1 }) => {
+    // A C891F's `show terminal` read "XTERM" from PuTTY, "xterm" from Thyrion.
+    await waitUntil(() => r1.ttype !== null, { what: 'the terminal type' });
+    assert.equal(r1.ttype, 'XTERM');
+  }],
+
   ['what is typed reaches the console once and is echoed once', async ({ app, r1 }) => {
     await command(app, r1, 'show version');
     await app.waitForScreen('you typed: show version');
