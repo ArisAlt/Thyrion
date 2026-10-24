@@ -127,7 +127,9 @@ impl Echoes {
     /// echo, or swallowed the line) or after `ECHO_MAX` in all. Silence,
     /// not a fixed time per line: a C891F at 9600 baud took 1.4 s to echo
     /// a 150-character line it scrolled sideways (1.3 KB of redraws).
-    pub async fn wait_for(&self, mark: u64, line: &[u8], quiet: Duration) -> Option<Duration> {
+    /// Gives up at once when `cancel` is set: Cancel on a paste must not
+    /// wait out a console that keeps printing.
+    pub async fn wait_for(&self, mark: u64, line: &[u8], quiet: Duration, cancel: &AtomicBool) -> Option<Duration> {
         let started = Instant::now();
         let deadline = started + ECHO_MAX;
         loop {
@@ -137,12 +139,16 @@ impl Echoes {
             if self.echoed(mark, line) {
                 return Some(started.elapsed());
             }
-            let heard = self.recent.lock().unwrap().at.map_or(started, |at| at.max(started));
-            let until = (heard + quiet).min(deadline);
-            if Instant::now() >= until {
+            if cancel.load(Ordering::Relaxed) {
                 return None;
             }
-            let _ = tokio::time::timeout_at(until.into(), more).await;
+            let heard = self.recent.lock().unwrap().at.map_or(started, |at| at.max(started));
+            let until = (heard + quiet).min(deadline);
+            let now = Instant::now();
+            if now >= until {
+                return None;
+            }
+            let _ = tokio::time::timeout_at(until.min(now + CANCEL_CHECK).into(), more).await;
         }
     }
 }
@@ -170,6 +176,8 @@ const ECHO_QUIET: Duration = Duration::from_secs(1);
 /// The longest a line waits for its echo while the console keeps printing
 /// other things.
 const ECHO_MAX: Duration = Duration::from_secs(10);
+/// How often a waiting line looks at the paste's Cancel.
+const CANCEL_CHECK: Duration = Duration::from_millis(50);
 
 impl SessionRegistry {
     /// Writes `text` line by line with `line_delay` between lines. Goes
@@ -210,7 +218,7 @@ impl SessionRegistry {
                 break;
             }
             if let (Some(echo), Some((mark, last))) = (&echo, waiting.take()) {
-                if let Some(took) = echo.wait_for(mark, &last, quiet_after(&echo_times)).await {
+                if let Some(took) = echo.wait_for(mark, &last, quiet_after(&echo_times), &cancel).await {
                     echo_times.push(took);
                 }
                 if cancel.load(Ordering::Relaxed) {
@@ -314,8 +322,7 @@ mod tests {
             }
             feed.saw(b"show clock\r\nR1#");
         });
-        let started = Instant::now();
-        let took = e.wait_for(mark, b"show clock\r", ECHO_QUIET).await.expect("echoed");
+        let took = e.wait_for(mark, b"show clock\r", ECHO_QUIET, &AtomicBool::new(false)).await.expect("echoed");
         assert!(took >= Duration::from_millis(1400), "{took:?}");
     }
 
@@ -323,9 +330,30 @@ mod tests {
     async fn a_silent_console_is_given_up_on_after_a_second() {
         let e = Echoes::default();
         let started = Instant::now();
-        assert_eq!(e.wait_for(e.mark(), b"show clock\r", ECHO_QUIET).await, None);
+        assert_eq!(e.wait_for(e.mark(), b"show clock\r", ECHO_QUIET, &AtomicBool::new(false)).await, None);
         let took = started.elapsed();
         assert!(took >= Duration::from_millis(950) && took < Duration::from_millis(1500), "{took:?}");
+    }
+
+    #[tokio::test]
+    async fn cancel_stops_the_wait_while_the_console_keeps_printing() {
+        // Output that isn't the echo kept the wait going for up to 10 s.
+        let e = Arc::new(Echoes::default());
+        let mark = e.mark();
+        let (feed, cancel) = (e.clone(), Arc::new(AtomicBool::new(false)));
+        let stop = cancel.clone();
+        tokio::spawn(async move {
+            for i in 0..100 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                feed.saw(b"*Oct 24 %LINK-3-UPDOWN: flapping\r\n");
+                if i == 10 {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            }
+        });
+        let started = Instant::now();
+        assert_eq!(e.wait_for(mark, b"show clock\r", ECHO_QUIET, &cancel).await, None);
+        assert!(started.elapsed() < Duration::from_millis(600), "{:?}", started.elapsed());
     }
 
     #[test]
