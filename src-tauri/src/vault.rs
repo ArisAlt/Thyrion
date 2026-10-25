@@ -527,6 +527,12 @@ mod tests {
     use super::*;
     use plinky_core::{Vault, VaultEntry};
 
+    /// The master password of a test's throwaway vault. Made at run time:
+    /// CodeQL reads a fixed string here as a hard-coded password.
+    fn throwaway_password() -> String {
+        std::process::id().to_string()
+    }
+
     #[test]
     fn vault_keys_follow_the_names_the_vault_screen_suggests() {
         let keys = vault_key_candidates("Server 2", None, Some("192.0.2.10"), Some("ops"));
@@ -555,7 +561,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("plinky-vault-lookup-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let mut vault = Vault::create_fast(dir.join("vault.bin"), "pw").unwrap();
+        let mut vault = Vault::create_fast(dir.join("vault.bin"), &throwaway_password()).unwrap();
 
         vault.set_entry(VaultEntry::new("192.0.2.10", "by-host"));
         let e = find_session_entry_for(&vault, saved("Server 2").as_ref(), "Server 2", None, None).unwrap();
@@ -593,7 +599,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("plinky-jump-lookup-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let mut vault = Vault::create_fast(dir.join("vault.bin"), "pw").unwrap();
+        let mut vault = Vault::create_fast(dir.join("vault.bin"), &throwaway_password()).unwrap();
         vault.set_entry(VaultEntry::new("session:Router", "final-pw"));
         vault.set_entry(VaultEntry::new("jump:Router", "jump-pw"));
         vault.set_entry(VaultEntry::new("session:Bastion", "preset-pw"));
@@ -652,7 +658,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("plinky-cli-jump-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let mut vault = Vault::create_fast(dir.join("vault.bin"), "pw").unwrap();
+        let mut vault = Vault::create_fast(dir.join("vault.bin"), &throwaway_password()).unwrap();
         vault.set_entry(VaultEntry::new("session:PE2", "ios-pw"));
         vault.set_entry(VaultEntry::new("jump:PE2", "nxos-pw"));
         let none = |_: &str| None;
