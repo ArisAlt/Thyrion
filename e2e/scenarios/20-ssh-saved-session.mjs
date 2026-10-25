@@ -7,9 +7,10 @@ import { startSshd, writePuttySession, waitUntil } from '../lib/fixtures.mjs';
 
 export const title = 'SSH to a saved session';
 
-export async function setup({ home, runDir }) {
+export async function setup({ home, runDir, defer }) {
   const sshd = await startSshd(path.join(runDir, 'sshd'));
-  if (!sshd) return { skip: 'needs sshd, ssh-keygen and puttygen' };
+  if (!sshd) return { skip: 'needs sshd, ssh-keygen and puttygen', expectedSkip: process.platform === 'win32' };
+  defer(() => sshd.stop());
   writePuttySession(home, 'Lab Server', {
     HostName: '127.0.0.1',
     PortNumber: sshd.port,
@@ -17,10 +18,8 @@ export async function setup({ home, runDir }) {
     UserName: os.userInfo().username,
     PublicKeyFile: sshd.ppk,
   });
-  return { state: { sshd }, cleanup: () => sshd.stop() };
+  return { state: { sshd } };
 }
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Runs a shell command and returns the screen text after its marker line.
 async function shell(app, cmd, marker) {
@@ -80,9 +79,9 @@ export const tests = [
 
   ['Ctrl+C stops a running command', async ({ app }) => {
     await app.run((e) => e.focusTerminal());
-    await app.type('sleep 30; echo slept');
+    await app.type('echo __RUNNING__; sleep 30; echo slept');
     await app.key('Enter');
-    await sleep(400);
+    await app.waitForScreen(/^__RUNNING__$/m);
     const started = Date.now();
     await app.key('Ctrl+C');
     await app.waitFor((e) => {
@@ -106,8 +105,9 @@ export const tests = [
     // to: the redraw on reattach was read as a new login prompt.
     for (let i = 0; i < 4; i++) {
       await app.run((e) => e.focusTerminal());
+      const before = (await app.tabs()).find((t) => t.active).id;
       await app.key('Ctrl+Tab');
-      await sleep(300);
+      await app.waitFor((e, id) => e.tabs().some((t) => t.active && t.id !== id), [before], { what: 'the other SSH tab to become active' });
     }
     const tabs = await app.tabs();
     assert.deepEqual(tabs.map((t) => t.status), ['live', 'live']);

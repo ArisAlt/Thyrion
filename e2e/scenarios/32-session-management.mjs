@@ -8,14 +8,16 @@ import { startConsole, writePuttySession, waitUntil } from '../lib/fixtures.mjs'
 
 export const title = 'Saved sessions: create, edit, rename';
 
-export async function setup({ home }) {
+export async function setup({ home, defer }) {
   // Two consoles, so a changed port can be seen by which one gets the call.
   const a = await startConsole({ name: 'RA' });
+  defer(() => a.stop());
   const b = await startConsole({ name: 'RB' });
+  defer(() => b.stop());
   writePuttySession(home, 'Edge R6', {
     HostName: '127.0.0.1', PortNumber: a.port, Protocol: 'telnet', PlinkyFolder: 'Lab',
   });
-  return { state: { a, b }, cleanup: async () => { await a.stop(); await b.stop(); } };
+  return { state: { a, b } };
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

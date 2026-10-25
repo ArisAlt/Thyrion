@@ -6,16 +6,17 @@ import { startConsole, waitUntil } from '../lib/fixtures.mjs';
 
 export const title = 'Console servers that negotiate nothing (telnet and raw)';
 
-export async function setup() {
+export async function setup({ defer }) {
   const telnet = await startConsole({ name: 'SW1', negotiate: false });
+  defer(() => telnet.stop());
   const raw = await startConsole({ name: 'SW2', negotiate: false });
+  defer(() => raw.stop());
   return {
     args: [
       '--telnet', '127.0.0.1', String(telnet.port), '--title', 'SW1',
       '--raw', '127.0.0.1', String(raw.port), '--title', 'SW2',
     ],
     state: { telnet, raw },
-    cleanup: async () => { await telnet.stop(); await raw.stop(); },
   };
 }
 
@@ -27,7 +28,6 @@ async function showTab(app, title) {
     if (el && el.dataset.tabActive !== 'true') e.click(el);
     return el?.dataset.tabActive === 'true';
   }, [title], { what: `tab ${title} in front` });
-  await sleep(150);
   await app.run((e) => e.focusTerminal());
 }
 
@@ -42,7 +42,7 @@ const lineTests = (label, stateKey, title) => [
     await showTab(app, title);
     con.clear();
     await app.type('show vlan');
-    await sleep(200);
+    await app.waitForScreen('show vlan');
     const screen = (await app.screen()).join('\n');
     assert.equal((screen.match(/show vlan/g) ?? []).length, 1, `typed text shows once:\n${screen}`);
     await app.key('Enter');
@@ -76,7 +76,7 @@ const lineTests = (label, stateKey, title) => [
     await app.key('Backspace');
     await app.type('ow ip');
     await app.key('Up');
-    await sleep(200);
+    await app.waitForScreen(/>show ip$/m);
     const typed = (await app.screen()).filter((l) => l.trim()).at(-1);
     assert.match(typed, />show ip$/, 'Backspace erased the w and Up showed nothing');
     await app.key('Enter');

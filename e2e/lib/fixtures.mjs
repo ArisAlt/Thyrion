@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { isWindows, writeRegistrySession } from './windows.mjs';
+import { stopProcess } from './process.mjs';
 
 const IAC = 255, DONT = 254, DO = 253, WONT = 252, WILL = 251, SB = 250, SE = 240;
 const TTYPE = 24, TTYPE_IS = 0, TTYPE_SEND = 1;
@@ -181,7 +182,9 @@ export async function startConsole({ name = 'R1', negotiate = true, host = '127.
   };
 
   const server = net.createServer(handle);
-  await new Promise((r, j) => { server.once('error', j); server.listen(port, host, r); });
+  try {
+    await new Promise((r, j) => { server.once('error', j); server.listen(port, host, r); });
+  } catch (e) { server.close(); throw e; }
   con.port = server.address().port;
 
   con.text = () => con.received.toString('latin1');
@@ -214,8 +217,7 @@ export async function startSshd(dir, { sftp = false, prompt = 'e2e$ ', sftpDir =
   execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', f('client_key')]);
   fs.copyFileSync(f('client_key.pub'), f('authorized_keys'));
   execFileSync('puttygen', [f('client_key'), '-o', f('client_key.ppk'), '-O', 'private']);
-  const fingerprint = execFileSync('ssh-keygen', ['-l', '-E', 'sha256', '-f', f('host_key.pub')])
-    .toString().split(' ')[1];
+  const fingerprint = () => execFileSync('ssh-keygen', ['-l', '-E', 'sha256', '-f', f('host_key.pub')]).toString().split(' ')[1];
 
   // ForceCommand replaces the sftp subsystem too; with `sftp` the
   // subsystem's own command, which sshd passes in SSH_ORIGINAL_COMMAND, is
@@ -251,23 +253,46 @@ export async function startSshd(dir, { sftp = false, prompt = 'e2e$ ', sftpDir =
     `ForceCommand ${f('login.sh')}`,
     '',
   ].join('\n'));
-  const child = spawn(sshd, ['-D', '-e', '-f', f('sshd_config')], { stdio: ['ignore', 'ignore', fs.openSync(f('sshd.log'), 'a')] });
-  await waitUntil(() => new Promise((r) => {
-    const s = net.connect(port, '127.0.0.1', () => { s.destroy(); r(true); });
-    s.on('error', () => r(false));
-  }), { what: 'sshd to listen', timeoutMs: 5000 });
+  let child;
+  const start = async () => {
+    const log = fs.openSync(f('sshd.log'), 'a');
+    child = spawn(sshd, ['-D', '-e', '-f', f('sshd_config')], { stdio: ['ignore', 'ignore', log] });
+    fs.closeSync(log);
+    let spawnError;
+    child.on('error', (e) => { spawnError = e; });
+    try {
+      await waitUntil(() => {
+        if (spawnError) throw spawnError;
+        if (child.exitCode !== null) throw new Error(fs.readFileSync(f('sshd.log'), 'utf8'));
+        return new Promise((resolve) => {
+          const socket = net.connect(port, '127.0.0.1', () => { socket.destroy(); resolve(true); });
+          socket.setTimeout(500, () => { socket.destroy(); resolve(false); });
+          socket.on('error', () => resolve(false));
+        });
+      }, { what: 'sshd to listen', timeoutMs: 5000 });
+    } catch (e) { await stopProcess(child); throw e; }
+  };
+  await start();
   return {
     port,
-    fingerprint,
+    get fingerprint() { return fingerprint(); },
     ppk: f('client_key.ppk'),
     log: () => fs.readFileSync(f('sshd.log'), 'utf8'),
-    stop: () => { child.kill(); },
+    stop: () => stopProcess(child),
+    async rotateHostKey() {
+      await stopProcess(child);
+      fs.unlinkSync(f('host_key'));
+      fs.unlinkSync(f('host_key.pub'));
+      execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', f('host_key')]);
+      await start();
+    },
   };
 }
 
 export function freePort() {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const s = net.createServer();
+    s.once('error', reject);
     s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
   });
 }
@@ -293,10 +318,20 @@ export async function startSerialDevice(dir, { name = 'R9' } = {}) {
   const appSide = path.join(dir, 'ttyE2E0');
   const deviceSide = path.join(dir, 'ttyE2E1');
   const socat = spawn('socat', [`pty,raw,echo=0,link=${appSide}`, `pty,raw,echo=0,link=${deviceSide}`], { stdio: 'ignore' });
-  await waitUntil(() => fs.existsSync(appSide) && fs.existsSync(deviceSide), { what: 'socat ptys', timeoutMs: 5000 });
+  let spawnError;
+  socat.on('error', (e) => { spawnError = e; });
+  try {
+    await waitUntil(() => {
+      if (spawnError) throw spawnError;
+      if (socat.exitCode !== null) throw new Error('socat exited before creating PTYs');
+      return fs.existsSync(appSide) && fs.existsSync(deviceSide);
+    }, { what: 'socat ptys', timeoutMs: 5000 });
+  } catch (e) { await stopProcess(socat); throw e; }
 
   const dev = { name, path: appSide, received: Buffer.alloc(0), lines: [] };
-  const fd = fs.openSync(deviceSide, fs.constants.O_RDWR | fs.constants.O_NOCTTY);
+  let fd;
+  try { fd = fs.openSync(deviceSide, fs.constants.O_RDWR | fs.constants.O_NOCTTY); }
+  catch (e) { await stopProcess(socat); throw e; }
   const say = (s) => { try { fs.writeSync(fd, Buffer.from(s, 'utf8')); } catch { /* line gone */ } };
   let line = '';
   const stream = fs.createReadStream(null, { fd, autoClose: false });
@@ -324,7 +359,12 @@ export async function startSerialDevice(dir, { name = 'R9' } = {}) {
   dev.waitForBytes = (s, opts = {}) =>
     waitUntil(() => dev.received.includes(Buffer.from(s)), { what: `${name} to receive ${JSON.stringify(s)}`, ...opts });
   /** The USB adapter pulled out: the line goes away. */
-  dev.unplug = () => { stream.destroy(); try { fs.closeSync(fd); } catch { /* closed */ } socat.kill(); };
+  let unplugging;
+  dev.unplug = () => unplugging ??= (async () => {
+    stream.destroy();
+    await stopProcess(socat);
+    try { fs.closeSync(fd); } catch { /* closed */ }
+  })();
   dev.stop = dev.unplug;
   return dev;
 }

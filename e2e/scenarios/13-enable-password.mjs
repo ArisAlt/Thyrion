@@ -7,9 +7,11 @@ import { startConsole, writePuttySession, waitUntil } from '../lib/fixtures.mjs'
 
 export const title = 'Enable password on a Telnet console';
 
-export async function setup({ home }) {
+export async function setup({ home, defer }) {
   const sw1 = await startConsole({ name: 'SW1', greet: true, enableSecret: 'en4ble' });
+  defer(() => sw1.stop());
   const sw2 = await startConsole({ name: 'SW2', greet: true, enableSecret: 's3cond' });
+  defer(() => sw2.stop());
   // SW1: the enable password saved, and sent when the device asks.
   writePuttySession(home, 'Core SW1', {
     HostName: '127.0.0.1', PortNumber: sw1.port, Protocol: 'telnet',
@@ -17,7 +19,7 @@ export async function setup({ home }) {
   });
   // SW2: nothing saved yet.
   writePuttySession(home, 'Access SW2', { HostName: '127.0.0.1', PortNumber: sw2.port, Protocol: 'telnet' });
-  return { state: { sw1, sw2 }, cleanup: () => Promise.all([sw1.stop(), sw2.stop()]) };
+  return { state: { sw1, sw2 } };
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

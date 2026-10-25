@@ -10,6 +10,7 @@
 //   node e2e/run.mjs --only paste     only tests whose name contains "paste"
 //   node e2e/run.mjs --visible        show the windows on your desktop
 //   node e2e/run.mjs --keep           keep the test profiles for inspection
+//   node e2e/run.mjs --strict-skips   fail if required fixtures are missing (default in CI)
 //
 // Linux and Windows (Windows on a CI runner only: lib/windows.mjs). Needs
 // Node 22+, plink, and on Linux kwin_wayland or Xvfb; the
@@ -25,6 +26,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { startDisplay } from './lib/display.mjs';
 import { launchApp } from './lib/app.mjs';
+import { cleanupScope, selectTests, runSteps } from './lib/lifecycle.mjs';
 import { isWindows, resetProfile, assertThrowawayMachine, testBuildConfig } from './lib/windows.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -32,7 +34,12 @@ const root = path.resolve(here, '..');
 
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(name);
-const option = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
+const option = (name) => {
+  const i = argv.indexOf(name);
+  if (i < 0) return undefined;
+  if (!argv[i + 1] || argv[i + 1].startsWith('--')) throw new Error(`${name} needs a value`);
+  return argv[i + 1];
+};
 const only = option('--only')?.toLowerCase();
 const binary = path.resolve(option('--binary') ?? path.join(root, `target/debug/thyrion${isWindows ? '.exe' : ''}`));
 
@@ -49,10 +56,9 @@ function preflight() {
   }
   if (flag('--build')) {
     console.log(color.dim('building the app for testing (debug, frontend embedded)...'));
-    // On Windows the test build also opens WebView2's DevTools port.
-    const extra = isWindows
-      ? ['--config', testBuildConfig(path.join(root, 'src-tauri/tauri.conf.json'), path.join(os.tmpdir(), 'thyrion-e2e.conf.json'))]
-      : [];
+    // Test-only native close permission enables genuine restart tests.
+    // On Windows the overlay also opens WebView2's DevTools port.
+    const extra = ['--config', testBuildConfig(path.join(root, 'src-tauri/tauri.conf.json'), path.join(os.tmpdir(), 'thyrion-e2e.conf.json'))];
     // npx is npx.cmd on Windows, which Node starts only through a shell.
     const r = spawnSync('npx', ['tauri', 'build', '--debug', '--no-bundle', '--ignore-version-mismatches', ...extra], {
       cwd: root, stdio: ['ignore', 'inherit', 'inherit'], shell: isWindows,
@@ -67,87 +73,100 @@ function preflight() {
 }
 
 async function main() {
+  // Select before preflight/build/display startup: a typo must not be a green
+  // run, and discovering it should not need a desktop build.
+  const selected = [];
+  for (const file of fs.readdirSync(path.join(here, 'scenarios')).filter((f) => f.endsWith('.mjs')).sort()) {
+    const scenario = await import(pathToFileURL(path.join(here, 'scenarios', file)));
+    const tests = selectTests(scenario.tests, file, only);
+    if (tests.length) selected.push({ file, scenario, tests });
+  }
+  if (!selected.length) throw new Error(`no matching tests${only ? ` for --only ${JSON.stringify(only)}` : ''}`);
   preflight();
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'thyrion-e2e-'));
-  const display = await startDisplay({ runDir, visible: flag('--visible') });
-  console.log(color.dim(`app: ${path.relative(root, binary)}   screen: ${display.kind}   files: ${runDir}`));
-
-  const files = fs.readdirSync(path.join(here, 'scenarios')).filter((f) => f.endsWith('.mjs')).sort();
+  let display;
   const results = [];
   try {
-    for (const file of files) {
-      const scenario = await import(pathToFileURL(path.join(here, 'scenarios', file)));
-      // A scenario's tests are steps on one running app: each starts where
-      // the one before left off. --only runs a matching test's earlier steps
-      // too, as preparation, and reports them only if they fail.
-      const wanted = (name) => !only || name.toLowerCase().includes(only) || file.includes(only);
-      const last = scenario.tests.findLastIndex(([name]) => wanted(name));
-      if (last < 0) continue;
-      const tests = scenario.tests.slice(0, last + 1).map(([name, fn, opts]) => [name, fn, opts, wanted(name)]);
+    display = await startDisplay({ runDir, visible: flag('--visible') });
+    console.log(color.dim(`app: ${path.relative(root, binary)}   screen: ${display.kind}   files: ${runDir}`));
+    for (const { file, scenario, tests } of selected) {
       console.log(`\n${scenario.title}`);
-
       const home = fs.mkdtempSync(path.join(runDir, `${path.basename(file, '.mjs')}-`));
-      // Windows keeps sessions and app data in fixed places: clear them so
-      // each scenario starts clean, as a fresh home does on Linux.
-      if (isWindows) resetProfile();
-      const ctx = { home, runDir, binary, display, launch: (opts) => launchApp({ binary, display, home, ...opts }) };
-      let prepared;
-      try {
-        prepared = await scenario.setup(ctx);
-      } catch (e) {
-        for (const [name, , , shown] of tests) if (shown) results.push({ file, name, ok: false, error: `setup failed: ${e.stack}` });
-        console.log(color.red(`  setup failed: ${e.message}`));
-        continue;
-      }
-      if (prepared.skip) {
-        for (const [name, , , shown] of tests) if (shown) results.push({ file, name, skipped: prepared.skip });
-        console.log(color.yellow(`  skipped: ${prepared.skip}`));
-        continue;
-      }
-
+      const scope = cleanupScope();
       let app;
-      try {
-        app = await ctx.launch({ args: prepared.args ?? [], env: prepared.env ?? {} });
-        for (const [name, fn, opts = {}, shown] of tests) {
-          const started = Date.now();
-          try {
-            await withTimeout(fn({ app, ...prepared.state, ctx }), opts.timeoutMs ?? 30000, name);
-            if (!shown) continue;
-            results.push({ file, name, ok: true });
-            console.log(`  ${color.green('✓')} ${name} ${color.dim(`${Date.now() - started} ms`)}`);
-          } catch (e) {
-            const scene = await snapshot(app);
-            const label = shown ? name : `${name} (an earlier step of the one asked for)`;
-            results.push({ file, name: label, ok: false, error: e.message, scene });
-            console.log(`  ${color.red('✗')} ${label}`);
-            console.log(indent(color.red(e.message), 6));
-            if (scene) console.log(indent(color.dim(scene), 6));
-            if (app.exited) break; // the app died; every later test would fail the same way
-            await app.run((p) => p.dismissAll()).catch(() => {});
-          }
+      let prepared;
+      const ctx = {
+        home, runDir, binary, display, defer: scope.defer,
+        async launch(opts = {}) {
+          if (scope.closed) throw new Error('the scenario has already ended');
+          const next = await launchApp({ binary, display, home, ...opts, onStart: scope.defer });
+          if (scope.closed) { await next.stop(); throw new Error('the scenario ended during launch'); }
+          return next;
+        },
+        async restart() {
+          await app.closeWindow();
+          await app.stop();
+          app = await ctx.launch({ env: prepared.env ?? {} });
+          return app;
+        },
+      };
+      const report = (result) => {
+        results.push({ file, ...result });
+        if (result.ok) console.log(`  ${color.green('✓')} ${result.name} ${color.dim(`${result.durationMs} ms`)}`);
+        else if (result.blocked) console.log(color.yellow(`  blocked: ${result.name} (after ${result.blocked})`));
+        else {
+          console.log(color.red(`  ✗ ${result.name}${result.preparation ? ' (required preparation)' : ''}`));
+          console.log(indent(color.red(result.error), 6));
+          if (result.scene) console.log(indent(color.dim(result.scene), 6));
         }
+      };
+      try {
+        if (isWindows) resetProfile();
+        prepared = await scenario.setup(ctx);
+        if (prepared.skip) {
+          // CI's Linux job installs all fixtures. Windows explicitly lacks
+          // sshd and serial PTYs; only declared platform skips are accepted.
+          const unexpected = (process.env.CI === 'true' || flag('--strict-skips')) && !prepared.expectedSkip;
+          for (const [name, , , shown] of tests) if (shown) {
+            if (unexpected) report({ name, ok: false, error: `unexpected skip: ${prepared.skip}` });
+            else results.push({ file, name, skipped: prepared.skip });
+          }
+          console.log(color.yellow(`  skipped: ${prepared.skip}`));
+          continue;
+        }
+        app = await ctx.launch({ args: prepared.args ?? [], env: prepared.env ?? {} });
+        await runSteps(tests, () => ({ app, ...prepared.state, ctx }), {
+          onResult: report,
+          onFailure: async (result) => {
+            result.scene = await snapshot(app);
+            try { await scope.close(); } catch (e) {
+              result.error += `\nCleanup errors: ${e.errors ?? e}`;
+            }
+          },
+        });
       } catch (e) {
         for (const [name, , , shown] of tests) if (shown && !results.some((r) => r.file === file && r.name === name)) {
-          results.push({ file, name, ok: false, error: e.message });
+          report({ name, ok: false, error: `scenario failed: ${e.stack ?? e}` });
         }
-        console.log(color.red(`  could not start the app: ${e.message}`));
       } finally {
-        await app?.stop();
-        await prepared.cleanup?.();
+        try { await scope.close(); } catch (e) {
+          report({ name: 'cleanup', ok: false, error: String(e.errors ?? e) });
+        }
       }
     }
   } finally {
-    display.stop();
+    await display?.stop();
     if (!flag('--keep')) fs.rmSync(runDir, { recursive: true, force: true });
   }
 
   const passed = results.filter((r) => r.ok).length;
   const failed = results.filter((r) => r.ok === false);
   const skipped = results.filter((r) => r.skipped).length;
-  console.log(`\n${passed} passed, ${failed.length ? color.red(`${failed.length} failed`) : '0 failed'}${skipped ? `, ${skipped} skipped` : ''}`);
+  const blocked = results.filter((r) => r.blocked).length;
+  console.log(`\n${passed} passed, ${failed.length} failed, ${blocked} blocked, ${skipped} skipped`);
   for (const f of failed) console.log(color.red(`  ✗ ${f.name}`));
   if (flag('--keep')) console.log(color.dim(`profiles and logs kept in ${runDir}`));
-  process.exitCode = failed.length ? 1 : 0;
+  process.exitCode = failed.length || blocked ? 1 : 0;
 }
 
 async function snapshot(app) {
@@ -162,14 +181,6 @@ async function snapshot(app) {
   } catch {
     return app.exited ? `the app exited (${JSON.stringify(app.exited)}); log: ${app.log}` : null;
   }
-}
-
-function withTimeout(promise, ms, name) {
-  let timer;
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`"${name}" took longer than ${ms} ms`)), ms); }),
-  ]).finally(() => clearTimeout(timer));
 }
 
 const indent = (s, n) => s.split('\n').map((l) => ' '.repeat(n) + l).join('\n');

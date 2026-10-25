@@ -21,8 +21,8 @@ export const SESSIONS_KEY = 'HKCU\\Software\\SimonTatham\\PuTTY\\Sessions';
  *  any local program could drive the page, the vault included. */
 export const DEVTOOLS_PORT = 9333;
 
-/** A `tauri build --config` overlay for the test build: the window as
- *  tauri.conf.json has it, plus WebView2's DevTools port. Tauri's own
+/** A `tauri build --config` overlay for the test build: native close
+ *  permission for restart tests, plus WebView2's DevTools port on Windows. Tauri's own
  *  default arguments are kept, since setting any replaces them. */
 export function testBuildConfig(confPath, outPath) {
   const conf = JSON.parse(fs.readFileSync(confPath, 'utf8'));
@@ -34,7 +34,13 @@ export function testBuildConfig(confPath, outPath) {
       '--remote-allow-origins=*',
     ].join(' '),
   }));
-  fs.writeFileSync(outPath, JSON.stringify({ app: { windows } }, null, 2));
+  fs.writeFileSync(outPath, JSON.stringify({ app: {
+    ...(isWindows ? { windows } : {}),
+    security: { capabilities: [
+      ...(conf.app.security?.capabilities ?? ['default']),
+      { identifier: 'e2e-window-close', windows: ['main'], permissions: ['core:window:allow-close'] },
+    ] },
+  } }, null, 2));
   return outPath;
 }
 

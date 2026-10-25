@@ -195,6 +195,7 @@ export function installHelpers() {
     /** The tab headers, left to right. */
     tabs() {
       return [...document.querySelectorAll('[data-tab-status]')].map((el) => ({
+        id: el.dataset.tabId,
         title: el.querySelector('span[title="Double-click to rename"]')?.textContent ?? '',
         status: el.dataset.tabStatus,
         active: el.dataset.tabActive === 'true',

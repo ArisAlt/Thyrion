@@ -5,14 +5,15 @@ import { startConsole, writePuttySession, waitUntil } from '../lib/fixtures.mjs'
 
 export const title = 'Logon actions, tab colour, locked tab';
 
-export async function setup({ home }) {
+export async function setup({ home, defer }) {
   const r5 = await startConsole({ name: 'R5', greet: true });
+  defer(() => r5.stop());
   writePuttySession(home, 'Core R5', {
     HostName: '127.0.0.1', PortNumber: r5.port, Protocol: 'telnet',
     PlinkyLogonActions: JSON.stringify([['>', 'terminal length 0'], ['', 'show clock']]),
     PlinkyTabColor: 'red',
   });
-  return { state: { r5 }, cleanup: () => r5.stop() };
+  return { state: { r5 } };
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -75,14 +76,16 @@ export const tests = [
     }, [], { what: 'Green in the tab menu' });
     await app.waitFor((e) => e.tabEl('Core R5').style.borderTopColor === 'rgb(34, 197, 94)', [], { what: 'the tab to turn green' });
 
-    // The saved layout keeps it: a new start of the app in the same profile.
-    await sleep(500);
-    const again = await ctx.launch({});
-    try {
-      await again.waitFor((e) => e.tabEl('Core R5')?.style.borderTopColor === 'rgb(34, 197, 94)', [], { what: 'the restored tab to be green', timeoutMs: 10000 });
-    } finally {
-      await again.stop();
-    }
+    await app.waitFor(() => {
+      const layout = JSON.parse(localStorage.getItem('plinky_layout_state_v1') ?? 'null');
+      return layout?.tabs.some((tab) => tab.title === 'Core R5' && tab.color === 'green');
+    }, [], { what: 'the green tab to be saved' });
+    const oldPid = app.child.pid;
+    const again = await ctx.restart();
+    assert.ok(app.exited, 'the original process exited before relaunch');
+    assert.notEqual(again.child.pid, oldPid, 'a new process owns the restored window');
+    assert.equal(again.exited, null);
+    await again.waitFor((e) => e.tabEl('Core R5')?.style.borderTopColor === 'rgb(34, 197, 94)', [], { what: 'the restored tab to be green', timeoutMs: 10000 });
   }],
 
   ['a session\'s own colour scheme and font from Change Session Settings, over the Settings default', async ({ app }) => {
@@ -132,7 +135,7 @@ export const tests = [
     await app.waitFor((e) => e.visible(document.getElementById('settings-terminal-scheme')), [], { what: 'Settings, Appearance' });
     assert.ok(await pick('settings-terminal-scheme', 'putty'));
     await app.run((e) => e.click(document.querySelector('[aria-label="Close settings"]')));
-    await sleep(400);
+    await app.waitFor(() => !document.querySelector('[aria-label="Close settings"]'), [], { what: 'Settings to close' });
     assert.deepEqual(await look(), { bg: 'rgb(255, 255, 255)', size: '20px' });
   }],
 
@@ -160,7 +163,7 @@ export const tests = [
       sel.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
     });
-    assert.equal(await previewBg(), 'rgb(0, 0, 0)', 'the preview follows the pick');
+    await waitUntil(async () => await previewBg() === 'rgb(0, 0, 0)', { what: 'the preview to follow the pick' });
     await app.run((e) => e.dismissAll());
   }],
 ];
