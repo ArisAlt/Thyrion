@@ -18,7 +18,7 @@ vi.mock('../services/tauriBridge', async (orig) => ({
   ],
 }));
 
-import { HostKeyDialog, storedFingerprint } from '../components/terminal/TerminalView';
+import { HostKeyDialog, storedFingerprint } from '../components/terminal/HostKeyDialog';
 
 const base = {
   host: '127.0.0.1',
