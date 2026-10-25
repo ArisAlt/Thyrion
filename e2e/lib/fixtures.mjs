@@ -72,8 +72,7 @@ export const RUNNING_CONFIG = [
 const PIPE_FILTERS = ['include', 'exclude', 'begin', 'section', 'count'];
 
 /** IOS's output filters, on output whose lines end in CR LF. */
-export function filterOutput(out, kind, pattern) {
-  const re = new RegExp(pattern);
+export function filterOutput(out, kind, re) {
   const lines = out.split('\r\n');
   if (lines.at(-1) === '') lines.pop();
   let kept;
@@ -104,7 +103,7 @@ export function filterOutput(out, kind, pattern) {
  * Nothing is printed on connect: a router sitting at its prompt prints
  * nothing until it is sent Enter.
  */
-export async function startConsole({ name = 'R1', negotiate = true, host = '127.0.0.1', onlyFrom = null, greet = false, mark = '>', replies = null, port = 0, enableSecret = null } = {}) {
+export async function startConsole({ name = 'R1', negotiate = true, host = '127.0.0.1', onlyFrom = null, greet = false, mark = '>', replies = null, port = 0, enableSecret = null, patterns = [] } = {}) {
   const con = {
     name,
     received: Buffer.alloc(0), // data bytes, telnet commands removed
@@ -116,7 +115,14 @@ export async function startConsole({ name = 'R1', negotiate = true, host = '127.
     open: 0,
     sockets: new Set(),
     enabled: false,            // in privileged mode (enableSecret)
+    // The filter patterns the test will send, compiled here from the test's
+    // own strings. What arrives only picks one: text from the socket never
+    // becomes a regex, and a pattern that arrives changed (a lost trailing
+    // space) is one the console does not know.
+    patterns: new Map(),
   };
+  con.addPattern = (p) => { con.patterns.set(p, new RegExp(p)); };
+  patterns.forEach(con.addPattern);
   const userPrompt = `${name}${mark}`;
   let prompt = userPrompt;
 
@@ -161,16 +167,15 @@ export async function startConsole({ name = 'R1', negotiate = true, host = '127.
       if (cmd === 'exit') { say('\r\n'); sock.end(); return; }
       // `show ... | include|exclude|begin|section|count <regex>`, as IOS
       // filters output. The pattern is everything after the keyword, a
-      // trailing space included, so a test can tell whether one arrived.
+      // trailing space included; it must be one of `patterns`.
       const pipe = text.match(/^(.*?)\s\|\s*(\S+)(?:\s+(.*))?$/s);
       if (pipe) {
         const [, base, kind, pattern] = pipe;
         if (!PIPE_FILTERS.includes(kind)) { say(`\r\n% Invalid input detected at '^' marker.\r\n\r\n${prompt}`); return; }
         if (!pattern) { say(`\r\n% Incomplete command.\r\n\r\n${prompt}`); return; }
-        let filtered;
-        try { filtered = filterOutput(answer(base.trim()), kind, pattern); }
-        catch { say(`\r\n% Invalid regular expression\r\n${prompt}`); return; }
-        say(`\r\n${filtered}${prompt}`);
+        const re = con.patterns.get(pattern);
+        if (!re) { say(`\r\n% Unknown pattern (not given to startConsole): ${JSON.stringify(pattern)}\r\n${prompt}`); return; }
+        say(`\r\n${filterOutput(answer(base.trim()), kind, re)}${prompt}`);
         return;
       }
       say(`\r\n${answer(cmd)}${prompt}`);

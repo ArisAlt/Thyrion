@@ -9,8 +9,15 @@ import { startConsole } from '../lib/fixtures.mjs';
 
 export const title = 'Output filters (pipes) and typing edge cases on a console';
 
+// Every filter pattern the tests send (the console only knows these).
+const PATTERNS = [
+  '^interface', '^!|^ |^$', '^line vty', '^interface GigabitEthernet0/1$', '10\\.1\\.(1|2)\\.[0-9]+ 255',
+  'to core ', 'to core', 'backup  link', '^ ip address', '^!', '^router bgp', '^end', 'Αθήνα',
+  '^line 0199', '^line 019995',
+];
+
 export async function setup({ defer }) {
-  const r1 = await startConsole({ name: 'R1' });
+  const r1 = await startConsole({ name: 'R1', patterns: PATTERNS });
   defer(() => r1.stop());
   return { args: ['--telnet', '127.0.0.1', String(r1.port), '--title', 'R1'], state: { r1 } };
 }
@@ -166,6 +173,7 @@ export const tests = [
     let pattern = 'Loopback0';
     for (let i = 0; pattern.length < cols * 2; i++) pattern = `${words[i % words.length]}${i}|${pattern}`;
     const cmd = `show running-config | include ${pattern}`;
+    r1.addPattern(pattern);
     await app.run((e) => e.focusTerminal());
     await app.type(cmd);
     await app.key('Enter');
