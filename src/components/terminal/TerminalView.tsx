@@ -58,12 +58,12 @@ import { SESSION_SAVED_EVENT, SessionSavedDetail, SessionLook, sessionLookFrom, 
 import { useTerminalTheme, findTerminalTheme } from '../../themes/terminalThemes';
 import { useScrollback } from '../../services/scrollback';
 import { newId } from '../../services/ids';
-import { STATUS_DOT, STATUS_TEXT } from '../../services/sessionStatus';
 import { VaultUnlockDialog } from '../vault/VaultUnlockDialog';
 import { HostKeyDialog, storedFingerprint } from './HostKeyDialog';
 import { TerminalContextMenu, HookShell } from './TerminalContextMenu';
 import { EventLogDialog, SessionLogDialog, PuTTYEventLog } from './TerminalLogDialogs';
 import { TerminalSearchBar } from './TerminalSearchBar';
+import { TerminalHeader } from './TerminalHeader';
 import {
   DropOverlay, ConnectingOverlay, HostKeyChangedBar, ConnectionBar, LockedBar, ScriptBar,
   PasteProgressBar, PasswordPromptBar, VaultLockedPromptBar, EnableNoticeBar,
@@ -74,19 +74,6 @@ import { getMiddleClickPaste } from '../../services/middleClickPaste';
 import { terminalShortcut, keySequenceFor } from '../../services/shortcuts';
 import { readClipboard, writeClipboard, copiedText } from '../../services/clipboard';
 import { DEFAULT_TERMINAL_FONT, loadTerminalFont } from '../../themes/fonts';
-import {
-  Radio,
-  Sparkles,
-  Search, 
-  Copy, 
-  Zap,
-  FileText,
-  List,
-  Key,
-  Shield,
-  Check
-} from 'lucide-react';
-
 
 interface TerminalViewProps {
   tab: TerminalTab;
@@ -1828,16 +1815,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
   };
 
-  const getChannelColor = (ch: SyncChannel) => {
-    switch (ch) {
-      case 'A': return 'bg-ch-a/20 text-ch-a border-ch-a/40';
-      case 'B': return 'bg-ch-b/20 text-ch-b border-ch-b/40';
-      case 'C': return 'bg-ch-c/20 text-ch-c border-ch-c/40';
-      case 'D': return 'bg-ch-d/20 text-ch-d border-ch-d/40';
-      default: return 'bg-slate-800 text-slate-400 border-slate-700';
-    }
-  };
-
   return (
     <div 
       className="relative flex flex-col h-full w-full bg-plinky-950 overflow-hidden"
@@ -1855,224 +1832,44 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           transition: `opacity ${broadcastGlow ? 120 : 700}ms ease-out`,
         }}
       />
-      {/* Tab Control Overlay Header */}
-      <div className="relative flex items-center justify-between gap-3 px-3 py-1.5 bg-plinky-900/90 border-b border-plinky-800 text-xs select-none whitespace-nowrap">
-        <div className="flex items-center space-x-2 min-w-0 overflow-hidden">
-          <span
-            role="img"
-            aria-label={STATUS_TEXT[tab.status]}
-            title={STATUS_TEXT[tab.status]}
-            className={`h-2 w-2 rounded-full ${STATUS_DOT[tab.status]}`}
-          />
-          {titleSlot ?? <span className="font-semibold text-slate-200 truncate">{tab.sessionName}</span>}
-          {/* Quick-connect tabs are named after their target already; the
-              header read "Quick (127.0.0.1:1) (127.0.0.1:1)". */}
-          {(isLocalSession || !tab.sessionName.includes(`${tab.hostname}:${tab.port}`)) && (
-            <span className="text-plinky-muted font-mono truncate">
-              {isLocalSession ? '(local shell)' : `(${tab.hostname}:${tab.port})`}
-            </span>
-          )}
-        </div>
-
-        {hooksError && (
-          <div className="absolute top-full right-3 mt-1 z-40 px-2 py-1 rounded bg-rose-950/95 border border-rose-500/50 text-rose-300 text-meta shadow-lg animate-in fade-in slide-in-from-top-1 duration-150">
-            {hooksError}
-          </div>
-        )}
-        <div className="flex items-center space-x-2">
-          {/* Encrypted Vault Credentials Quick Action */}
-          {vaultKey && (
-            <div className="relative">
-              <button
-                onClick={() => {
-                  if (!isVaultMenuOpen) void refreshVault();
-                  setIsVaultMenuOpen(prev => !prev);
-                }}
-                title={`Encrypted Vault: ${vaultKey}`}
-                className={`flex items-center space-x-1 px-2 py-0.5 rounded border text-meta font-medium transition-colors ${
-                  isVaultMenuOpen
-                    ? 'bg-sky-500/15 text-sky-200 border-sky-500/40'
-                    : 'bg-slate-800/80 text-slate-300 border-plinky-700 hover:bg-slate-700 hover:text-slate-100'
-                }`}
-              >
-                <Key className="w-3 h-3 text-slate-400" />
-                <span>Vault</span>
-              </button>
-
-              {isVaultMenuOpen && (
-                <div 
-                  className="absolute right-0 top-full mt-1.5 z-40 w-56 bg-plinky-900 border border-plinky-700 rounded-lg shadow-2xl py-1.5 text-xs select-none backdrop-blur-md animate-in fade-in duration-100"
-                  onClick={e => e.stopPropagation()}
-                >
-                  <div className="px-3 py-1 border-b border-plinky-800 flex items-center justify-between">
-                    <span className="font-semibold text-slate-200 text-meta">Vault Credentials</span>
-                    <span className="text-meta text-plinky-muted font-mono truncate max-w-[100px]" title={vaultKey}>
-                      {vaultKey}
-                    </span>
-                  </div>
-
-                  {!isVaultUnlocked ? (
-                    <div className="p-2.5 text-center space-y-1.5">
-                      <p className="text-meta text-slate-400">Vault is currently locked.</p>
-                      <p className="text-meta text-plinky-muted">Unlock it with Vault in the top bar to send saved passwords.</p>
-                    </div>
-                  ) : (
-                    <div className="py-1">
-                      {vault?.hasLoginSecret !== false && <button
-                        onClick={() => {
-                          handleSendVaultPassword();
-                          setIsVaultMenuOpen(false);
-                        }}
-                        className="w-full flex items-center space-x-2 px-3 py-1.5 hover:bg-sky-600/30 hover:text-sky-200 text-left transition"
-                      >
-                        <Zap className="w-3.5 h-3.5 text-slate-400" />
-                        <span>Send Login Password</span>
-                      </button>}
-
-                      <button
-                        onClick={() => {
-                          requestEnablePassword();
-                          setIsVaultMenuOpen(false);
-                        }}
-                        aria-keyshortcuts="Control+Shift+E"
-                        className="w-full flex items-center space-x-2 px-3 py-1.5 hover:bg-sky-600/20 hover:text-sky-100 text-left transition"
-                      >
-                        <Shield className="w-3.5 h-3.5 text-slate-400" />
-                        <span className="flex-1">Send Enable Password</span>
-                        <span className="text-meta text-plinky-muted">{vault?.hasEnableSecret ? 'Ctrl+Shift+E' : 'none saved'}</span>
-                      </button>
-
-                      <div className="border-t border-plinky-800 my-1" />
-
-                      <button
-                        onClick={handleCopyVaultPassword}
-                        className="w-full flex items-center justify-between px-3 py-1 hover:bg-slate-800 text-slate-300 text-left text-meta transition"
-                      >
-                        <span className="flex items-center space-x-1.5">
-                          <Copy className="w-3 h-3 text-slate-400" />
-                          <span>Copy Password</span>
-                        </span>
-                        {copiedVaultKey === 'login' && <Check className="w-3 h-3 text-emerald-400" />}
-                      </button>
-
-                      {vault?.hasEnableSecret && (
-                        <button
-                          onClick={handleCopyVaultEnablePassword}
-                          className="w-full flex items-center justify-between px-3 py-1 hover:bg-slate-800 text-slate-300 text-left text-meta transition"
-                        >
-                          <span className="flex items-center space-x-1.5">
-                            <Copy className="w-3 h-3 text-slate-400" />
-                            <span>Copy Enable Password</span>
-                          </span>
-                          {copiedVaultKey === 'enable' && <Check className="w-3 h-3 text-emerald-400" />}
-                        </button>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Find In Terminal Button */}
-          <button
-            onClick={() => {
-              setIsSearchOpen(true);
-              setTimeout(() => searchInputRef.current?.focus(), 50);
-            }}
-            title="Find in Terminal (Ctrl+F)"
-            className="flex items-center space-x-1 px-2 py-0.5 rounded bg-slate-800/80 hover:bg-slate-700 text-slate-400 hover:text-slate-200 text-meta transition"
-          >
-            <Search className="w-3 h-3 text-sky-400" />
-            <span>Find</span>
-          </button>
-
-          {/* Sync Input Channel Badge */}
-          <div className="relative">
-            <button
-              onClick={() => setChannelMenuOpen(v => !v)}
-              onPointerDown={e => e.stopPropagation()}
-              aria-haspopup="menu"
-              aria-expanded={channelMenuOpen}
-              title="Broadcast channel: commands sent to a channel reach every live tab on it"
-              className={`flex items-center space-x-1 px-2 py-0.5 rounded border text-meta whitespace-nowrap transition-colors ${getChannelColor(tab.syncChannel)}`}
-            >
-              <Radio className="w-3 h-3" />
-              <span>Channel: {tab.syncChannel === 'none' ? 'Off' : tab.syncChannel}</span>
-            </button>
-            {channelMenuOpen && (
-              <div
-                role="menu"
-                aria-label="Broadcast channel"
-                onPointerDown={e => e.stopPropagation()}
-                className="absolute right-0 top-full mt-1 z-40 w-40 py-1 rounded-lg border border-plinky-700 bg-plinky-900 shadow-xl text-xs"
-              >
-                {(['none', 'A', 'B', 'C', 'D'] as const).map(ch => (
-                  <button
-                    key={ch}
-                    role="menuitemradio"
-                    aria-checked={tab.syncChannel === ch}
-                    onClick={() => chooseChannel(ch)}
-                    className={`w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-plinky-800 ${tab.syncChannel === ch ? 'text-slate-100' : 'text-slate-300'}`}
-                  >
-                    <span className={`w-5 text-center rounded border text-meta font-semibold ${ch === 'none' ? 'border-plinky-700 text-plinky-muted' : getChannelColor(ch)}`}>
-                      {ch === 'none' ? '·' : ch}
-                    </span>
-                    <span className="flex-1">{ch === 'none' ? 'Off' : `Channel ${ch}`}</span>
-                    {tab.syncChannel === ch && <Check className="w-3 h-3 text-sky-400" />}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Keyword highlighting toggle (T-017). This used to be a static
-              "Regex Hi" label claiming highlighting that didn't exist. */}
-          <button
-            onClick={() => onUpdateTab(tab.id, { activeHighlighting: tab.activeHighlighting === false })}
-            aria-pressed={tab.activeHighlighting !== false}
-            title={tab.activeHighlighting !== false
-              ? 'Keyword highlighting on: errors and down states red, warnings amber, up green, interfaces, IPs and MACs. Click to turn off.'
-              : 'Keyword highlighting off. Click to turn on.'}
-            className={`flex items-center space-x-1 px-1.5 py-0.5 rounded border text-meta transition ${
-              tab.activeHighlighting !== false
-                ? 'bg-sky-500/15 text-sky-300 border-sky-500/40 hover:bg-sky-500/25'
-                : 'bg-slate-800/60 text-plinky-muted border-slate-700 hover:text-slate-300'
-            }`}
-          >
-            <Sparkles className="w-3 h-3" />
-            <span>Highlight</span>
-          </button>
-
-          {/* PuTTY Session Logging Button */}
-          <button
-            onClick={() => setIsLoggingOpen(true)}
-            title="Session Logging (PuTTY-style) - record output to log file"
-            className={`flex items-center space-x-1 px-2 py-0.5 rounded border text-meta transition-colors ${
-              isLogging
-                ? 'bg-rose-500/20 text-rose-300 border-rose-500/50'
-                : 'bg-slate-800/80 text-slate-400 border-slate-700 hover:text-slate-300'
-            }`}
-          >
-            {isLogging ? (
-              <span className="h-1.5 w-1.5 rounded-full bg-rose-400"></span>
-            ) : (
-              <FileText className="w-3 h-3 text-slate-400" />
-            )}
-            <span>{isLogging ? `Log: ${(loggedBytes / 1024).toFixed(1)}k` : 'Log'}</span>
-          </button>
-
-          {/* PuTTY Event Log Button */}
-          <button
-            onClick={() => setIsEventLogOpen(true)}
-            title="PuTTY Event Log - view connection diagnostics and trace"
-            className="flex items-center space-x-1 px-2 py-0.5 rounded bg-slate-800/80 hover:bg-slate-700 text-slate-400 hover:text-slate-200 border border-slate-700 text-meta transition"
-          >
-            <List className="w-3 h-3 text-slate-400" />
-            <span>Events</span>
-          </button>
-        </div>
-      </div>
+      <TerminalHeader
+        status={tab.status}
+        title={titleSlot ?? <span className="font-semibold text-slate-200 truncate">{tab.sessionName}</span>}
+        // Quick-connect tabs are named after their target already; the
+        // header read "Quick (127.0.0.1:1) (127.0.0.1:1)".
+        subtitle={isLocalSession ? '(local shell)'
+          : tab.sessionName.includes(`${tab.hostname}:${tab.port}`) ? undefined : `(${tab.hostname}:${tab.port})`}
+        hooksError={hooksError}
+        vault={vaultKey ? {
+          entry: vaultKey,
+          unlocked: isVaultUnlocked,
+          hasLogin: vault?.hasLoginSecret !== false,
+          hasEnable: !!vault?.hasEnableSecret,
+          copied: copiedVaultKey,
+          open: isVaultMenuOpen,
+          onToggle: () => {
+            if (!isVaultMenuOpen) void refreshVault();
+            setIsVaultMenuOpen(prev => !prev);
+          },
+          onSendLogin: () => { handleSendVaultPassword(); setIsVaultMenuOpen(false); },
+          onSendEnable: () => { requestEnablePassword(); setIsVaultMenuOpen(false); },
+          onCopyLogin: handleCopyVaultPassword,
+          onCopyEnable: handleCopyVaultEnablePassword,
+        } : undefined}
+        onFind={() => {
+          setIsSearchOpen(true);
+          setTimeout(() => searchInputRef.current?.focus(), 50);
+        }}
+        channel={tab.syncChannel}
+        channelMenuOpen={channelMenuOpen}
+        onToggleChannelMenu={() => setChannelMenuOpen(v => !v)}
+        onChooseChannel={chooseChannel}
+        highlighting={tab.activeHighlighting !== false}
+        onToggleHighlighting={() => onUpdateTab(tab.id, { activeHighlighting: tab.activeHighlighting === false })}
+        logging={{ active: isLogging, bytes: loggedBytes }}
+        onOpenLogging={() => setIsLoggingOpen(true)}
+        onOpenEventLog={() => setIsEventLogOpen(true)}
+      />
 
       {isSearchOpen && (
         <TerminalSearchBar
