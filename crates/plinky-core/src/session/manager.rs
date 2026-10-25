@@ -8,8 +8,11 @@ use crate::transport::local::LocalTransport;
 use crate::transport::plink::PlinkTransport;
 use crate::transport::telnet::{NetTarget, NetTransport};
 use crate::session::flow::{FlowGate, OUTPUT_WINDOW};
-use crate::session::state_machine::{PreAuthStateMachine, PreAuthAction, SessionState, HostKeyPromptInfo, CloseReason};
+use crate::session::state_machine::{PreAuthStateMachine, PreAuthAction, SessionState, HostKeyPromptInfo};
 use crate::session::ring_buffer::ScrollbackRingBuffer;
+
+mod output_reader;
+use output_reader::OutputReader;
 
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -96,22 +99,18 @@ impl ActiveSession {
     }
 }
 
-/// Sends a chunk's output to the page attached to a session, unless that
-/// page already got the chunk in its attach replay. The reader puts a chunk
-/// in scrollback under the sessions lock and sends it after releasing it; an
-/// attach in between replayed the chunk, and sending it as well drew it
-/// twice. `chunk_end` is where the chunk ends in scrollback.
-fn send_fresh(
-    subscriber: &Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>,
-    replayed_to: &AtomicU64,
-    chunk_end: u64,
-    bytes: Vec<u8>,
-) -> bool {
-    let sub = subscriber.lock().unwrap();
-    match sub.as_ref() {
-        Some(tx) if chunk_end > replayed_to.load(Ordering::SeqCst) => tx.send(bytes).is_ok(),
-        _ => false,
-    }
+/// What a new session starts with (see `SessionRegistry::start_session`).
+struct NewSession<'a> {
+    id: &'a str,
+    name: &'a str,
+    transport: Box<dyn Transport>,
+    state_machine: PreAuthStateMachine,
+    raw_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    log_file_name: Option<String>,
+    out_tx: mpsc::UnboundedSender<Vec<u8>>,
+    flow: Arc<FlowGate>,
+    jump_login: Option<super::jump_login::JumpLogin>,
+    expect: Option<super::expect::Expect>,
 }
 
 pub struct ActiveSession {
@@ -251,153 +250,18 @@ impl SessionRegistry {
         id: &str,
         name: &str,
         transport: Box<dyn Transport>,
-        mut raw_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+        raw_rx: mpsc::UnboundedReceiver<Vec<u8>>,
         log_file_name: Option<String>,
         out_tx: mpsc::UnboundedSender<Vec<u8>>,
         flow: Arc<FlowGate>,
     ) -> Result<()> {
-        let log_file = log_file_name
-            .as_deref()
-            .filter(|p| !p.is_empty())
-            .and_then(|p| super::log::SessionLog::open(std::path::Path::new(p), super::log::LogMode::Printable).ok());
-
-        let id_owned = id.to_string();
-        let subscriber = Arc::new(Mutex::new(Some(out_tx)));
-        let sub_clone = subscriber.clone();
-        let replayed_to = Arc::new(AtomicU64::new(0));
-        let replayed_clone = replayed_to.clone();
-        let registry_clone = self.clone();
-        let id_for_task = id.to_string();
-        let instance = NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed);
-        let flow_for_task = flow.clone();
-
-        let reader = async move {
-            // Whether the loop's end has already been accounted for (Closed
-            // action sent its own notice, or the session was removed). If
-            // not, raw_rx hit EOF: the process exited on its own.
-            let mut reported = false;
-            while let Some(chunk) = raw_rx.recv().await {
-                let chunk_end: u64;
-                let action = {
-                    let mut lock = registry_clone.sessions.lock().unwrap();
-                    if let Some(session) = lock.get_mut(&id_for_task).filter(|s| s.instance == instance) {
-                        session.scrollback.push(&chunk);
-                        chunk_end = session.scrollback.total_bytes_written() as u64;
-                        session.feed_tap(&chunk);
-                        session.echoes.saw(&chunk);
-                        // PuTTY-style "all session output" logging: every raw
-                        // byte the PTY produces, regardless of PreAuth/Live
-                        // state -- a failed write just leaves the session
-                        // running, it never blocks the connection.
-                        if let Some(log) = session.log.as_mut() {
-                            // A log that can't be written any more (disk
-                            // full, drive gone) is closed, not retried per
-                            // chunk; the session carries on.
-                            if log.write(&chunk).is_err() {
-                                session.log = None;
-                            }
-                        }
-                        let action = session.state_machine.feed_bytes(&chunk);
-                        let locked = registry_clone.is_input_locked(&id_for_task);
-                        session.run_logon(&chunk, locked);
-                        action
-                    } else {
-                        reported = true;
-                        break;
-                    }
-                };
-
-                // Charged by the reader when read; what doesn't reach the
-                // page (a withheld prompt, a detached tab) is refunded below.
-                let chunk_len = chunk.len();
-                let mut forwarded = 0usize;
-                match action {
-                    PreAuthAction::Hold => {
-                        if send_fresh(&sub_clone, &replayed_clone, chunk_end, chunk) {
-                            forwarded = chunk_len;
-                        }
-                    }
-                    PreAuthAction::PassThrough(bytes) | PreAuthAction::TransitionToLive(bytes) => {
-                        let n = bytes.len();
-                        if send_fresh(&sub_clone, &replayed_clone, chunk_end, bytes) {
-                            forwarded = n;
-                        }
-                    }
-                    PreAuthAction::Suppress => {}
-                    PreAuthAction::Withhold(shown) => {
-                        if !shown.is_empty() {
-                            let n = shown.len();
-                            if send_fresh(&sub_clone, &replayed_clone, chunk_end, shown) {
-                                forwarded = n;
-                            }
-                        }
-                    }
-                    PreAuthAction::HostKeyPrompt(info) => {
-                        // Priority 1 security fix: DO NOT forward raw chunk to terminal.
-                        // Broadcast structured prompt event for native UI dialog.
-                        let _ = registry_clone.prompt_tx.send(PromptEvent {
-                            session_id: id_for_task.clone(),
-                            prompt: info,
-                        });
-                    }
-                    PreAuthAction::Closed(reason) => {
-                        let _ = registry_clone.ended_tx.send(id_for_task.clone());
-                        if let Some(tx) = sub_clone.lock().unwrap().as_ref() {
-                            let msg = match reason {
-                                CloseReason::AuthFailed(err) => {
-                                    if let Some(pos) = err.find("FATAL ERROR:") {
-                                        format!("\r\n\x1b[31m{}\x1b[0m\r\n", &err[pos..].trim())
-                                    } else {
-                                        format!("\r\n\x1b[31m[Thyrion: Session closed ({})]\x1b[0m\r\n", err)
-                                    }
-                                }
-                                CloseReason::HostKeyRejected => {
-                                    "\r\n\x1b[31m[Thyrion: Host key was rejected]\x1b[0m\r\n".to_string()
-                                }
-                                CloseReason::Error(err) => {
-                                    format!("\r\n\x1b[31m[Thyrion: Error: {}]\x1b[0m\r\n", err)
-                                }
-                                CloseReason::Ok => {
-                                    "\r\n[Thyrion: Session closed]\r\n".to_string()
-                                }
-                            };
-                            let _ = tx.send(msg.into_bytes());
-                        }
-                        reported = true;
-                        break;
-                    }
-                }
-                flow_for_task.ack(chunk_len.saturating_sub(forwarded) as u64);
-            }
-            if !reported {
-                registry_clone.report_process_exit(&id_for_task, instance, &sub_clone);
-            }
-        };
-
-        let mut sm = PreAuthStateMachine::new();
-        sm.force_live(); // No pre-auth phase: Live immediately
-
-        let active = ActiveSession {
-            id: id_owned.clone(),
-            name: name.to_string(),
-            transport,
-            state_machine: sm,
-            scrollback: ScrollbackRingBuffer::new(2 * 1024 * 1024), // 2 MiB
-            subscriber,
-            replayed_to,
-            log: log_file,
-            flow,
-            instance,
+        let mut state_machine = PreAuthStateMachine::new();
+        state_machine.force_live(); // No pre-auth phase: Live immediately
+        self.start_session(NewSession {
+            id, name, transport, state_machine, raw_rx, log_file_name, out_tx, flow,
             jump_login: None,
             expect: None,
-            tap: None,
-            logon: None,
-            echoes: Default::default(),
-        };
-
-        self.insert_new_session(id_owned, active)?;
-        tokio::spawn(reader);
-        Ok(())
+        })
     }
 
     /// Spawns an interactive plink PuTTY session.
@@ -482,7 +346,7 @@ impl SessionRegistry {
         rows: u16,
         out_tx: mpsc::UnboundedSender<Vec<u8>>,
     ) -> Result<()> {
-        let (raw_tx, mut raw_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (raw_tx, raw_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let flow = Arc::new(FlowGate::new(OUTPUT_WINDOW));
         let explicit_target_protocol = explicit_target.as_ref().map(|t| t.protocol);
         // Telnet and raw are connected here, not by plink: see telnet.rs.
@@ -491,198 +355,6 @@ impl SessionRegistry {
             Some(target) => Box::new(NetTransport::connect(&target, cols, rows, raw_tx, flow.clone())),
             None => Box::new(PlinkTransport::spawn_session(session_name, explicit_target.as_ref(), login.as_ref(), cols, rows, raw_tx, flow.clone())?),
         };
-        let log_file = log_file_name
-            .as_deref()
-            .filter(|p| !p.is_empty())
-            .and_then(|p| super::log::SessionLog::open(std::path::Path::new(p), super::log::LogMode::Printable).ok());
-
-        let id_owned = id.to_string();
-        let subscriber = Arc::new(Mutex::new(Some(out_tx)));
-        let sub_clone = subscriber.clone();
-        let replayed_to = Arc::new(AtomicU64::new(0));
-        let replayed_clone = replayed_to.clone();
-        let registry_clone = self.clone();
-        let id_for_task = id.to_string();
-        let instance = NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed);
-        let flow_for_task = flow.clone();
-
-        let reader = async move {
-            // Whether the loop's end has already been accounted for (Closed
-            // action sent its own notice, or the session was removed). If
-            // not, raw_rx hit EOF: the process exited on its own.
-            let mut reported = false;
-            // plink's "Press Return to begin session" after login (begin_gate.rs).
-            let mut begin_gate: Option<super::begin_gate::BeginGate> = None;
-            while let Some(chunk) = raw_rx.recv().await {
-                let mut script_note: Option<String> = None;
-                let chunk_end: u64;
-                let action = {
-                    let mut lock = registry_clone.sessions.lock().unwrap();
-                    if let Some(session) = lock.get_mut(&id_for_task).filter(|s| s.instance == instance) {
-                        session.scrollback.push(&chunk);
-                        chunk_end = session.scrollback.total_bytes_written() as u64;
-                        session.feed_tap(&chunk);
-                        session.echoes.saw(&chunk);
-                        if let Some(log) = session.log.as_mut() {
-                            // A log that can't be written any more (disk
-                            // full, drive gone) is closed, not retried per
-                            // chunk; the session carries on.
-                            if log.write(&chunk).is_err() {
-                                session.log = None;
-                            }
-                        }
-                        // Pre-auth only: once Live, remote output can never
-                        // draw a stored password out of the vault.
-                        if session.state_machine.is_live() {
-                            session.jump_login = None;
-                        } else if let Some(answer) = session.jump_login.as_mut().and_then(|j| j.feed(&chunk)) {
-                            let _ = session.transport.write(&answer);
-                        }
-                        if let Some(script) = session.expect.as_mut() {
-                            match script.feed(&chunk) {
-                                super::expect::Event::Send { bytes, .. } => {
-                                    let _ = session.transport.write(&bytes);
-                                }
-                                super::expect::Event::Stopped(why) => {
-                                    session.expect = None;
-                                    if let Some(why) = why.filter(|w| !w.is_empty()) {
-                                        script_note = Some(format!(
-                                            "\r\n\x1b[33m[Thyrion: jump script stopped ({why}). Carry on by hand.]\x1b[0m\r\n"
-                                        ));
-                                    }
-                                }
-                                super::expect::Event::None => {}
-                            }
-                            if session.expect.as_ref().is_some_and(|e| e.is_done()) {
-                                session.expect = None;
-                            }
-                        }
-                        let action = session.state_machine.feed_bytes(&chunk);
-                        let locked = registry_clone.is_input_locked(&id_for_task);
-                        session.run_logon(&chunk, locked);
-                        action
-                    } else {
-                        reported = true;
-                        break;
-                    }
-                };
-
-                // Charged by the reader when read; what doesn't reach the
-                // page (a withheld prompt, a detached tab) is refunded below.
-                if let Some(note) = script_note.take() {
-                    if let Some(tx) = sub_clone.lock().unwrap().as_ref() {
-                        let _ = tx.send(note.into_bytes());
-                    }
-                }
-                let chunk_len = chunk.len();
-                let mut forwarded = 0usize;
-                match action {
-                    PreAuthAction::Hold => {
-                        // Forward pre-auth interactive bytes (username prompt, password prompt, login banner)
-                        // directly to the subscriber so the user can see prompts and enter credentials.
-                        if send_fresh(&sub_clone, &replayed_clone, chunk_end, chunk) {
-                            forwarded = chunk_len;
-                        }
-                    }
-                    PreAuthAction::PassThrough(bytes) => {
-                        // Still watching for plink's begin prompt: on Windows
-                        // its line can arrive after the marker's chunk.
-                        let answer = begin_gate.as_mut().map(|g| g.feed(&bytes));
-                        let n = bytes.len();
-                        if send_fresh(&sub_clone, &replayed_clone, chunk_end, bytes) {
-                            forwarded = n;
-                        }
-                        if let Some(outcome @ (super::begin_gate::Gate::Answer | super::begin_gate::Gate::Done)) = answer {
-                            begin_gate = None;
-                            let mut lock = registry_clone.sessions.lock().unwrap();
-                            if let Some(session) = lock.get_mut(&id_for_task).filter(|s| s.instance == instance) {
-                                // The Return goes while plink still reads a
-                                // line; only then is the session begun.
-                                if outcome == super::begin_gate::Gate::Answer {
-                                    let _ = session.transport.write(b"\r");
-                                }
-                                session.transport.session_begun();
-                            }
-                        }
-                    }
-                    PreAuthAction::TransitionToLive(bytes) => {
-                        if send_fresh(&sub_clone, &replayed_clone, chunk_end, bytes.clone()) {
-                            forwarded = bytes.len();
-                        }
-                        // plink prints "Press Return to begin session." as a
-                        // one-time continuation gate right after auth
-                        // succeeds -- it's not a credential or a decision,
-                        // just a "press any key" pause, so auto-advance past
-                        // it instead of making the user hit Enter a second
-                        // time (once for their password, once more for this).
-                        // Watched past this chunk: see begin_gate.rs.
-                        let mut gate = super::begin_gate::BeginGate::new();
-                        match gate.feed(&bytes) {
-                            super::begin_gate::Gate::Waiting => begin_gate = Some(gate),
-                            outcome => {
-                                let mut lock = registry_clone.sessions.lock().unwrap();
-                                if let Some(session) = lock.get_mut(&id_for_task).filter(|s| s.instance == instance) {
-                                    // The Return goes while plink still reads
-                                    // a line; only then is the session begun.
-                                    if outcome == super::begin_gate::Gate::Answer {
-                                        let _ = session.transport.write(b"\r");
-                                    }
-                                    session.transport.session_begun();
-                                }
-                            }
-                        }
-                    }
-                    PreAuthAction::Suppress => {}
-                    PreAuthAction::Withhold(shown) => {
-                        if !shown.is_empty() {
-                            let n = shown.len();
-                            if send_fresh(&sub_clone, &replayed_clone, chunk_end, shown) {
-                                forwarded = n;
-                            }
-                        }
-                    }
-                    PreAuthAction::HostKeyPrompt(info) => {
-                        // Priority 1 security fix: DO NOT forward raw chunk to terminal.
-                        // Broadcast structured prompt event for native UI dialog.
-                        let _ = registry_clone.prompt_tx.send(PromptEvent {
-                            session_id: id_for_task.clone(),
-                            prompt: info,
-                        });
-                    }
-                    PreAuthAction::Closed(reason) => {
-                        let _ = registry_clone.ended_tx.send(id_for_task.clone());
-                        if let Some(tx) = sub_clone.lock().unwrap().as_ref() {
-                            let msg = match reason {
-                                CloseReason::AuthFailed(err) => {
-                                    if let Some(pos) = err.find("FATAL ERROR:") {
-                                        format!("\r\n\x1b[31m{}\x1b[0m\r\n", &err[pos..].trim())
-                                    } else {
-                                        format!("\r\n\x1b[31m[Thyrion: Session closed ({})]\x1b[0m\r\n", err)
-                                    }
-                                }
-                                CloseReason::HostKeyRejected => {
-                                    "\r\n\x1b[31m[Thyrion: Host key was rejected]\x1b[0m\r\n".to_string()
-                                }
-                                CloseReason::Error(err) => {
-                                    format!("\r\n\x1b[31m[Thyrion: Error: {}]\x1b[0m\r\n", err)
-                                }
-                                CloseReason::Ok => {
-                                    "\r\n[Thyrion: Session closed]\r\n".to_string()
-                                }
-                            };
-                            let _ = tx.send(msg.into_bytes());
-                        }
-                        reported = true;
-                        break;
-                    }
-                }
-                flow_for_task.ack(chunk_len.saturating_sub(forwarded) as u64);
-            }
-            if !reported {
-                registry_clone.report_process_exit(&id_for_task, instance, &sub_clone);
-            }
-        };
-
         // The PreAuth gate guards plink's SSH handshake: host-key prompt,
         // then the D9 "Access granted" marker. Serial / Telnet / Raw / Rlogin
         // sessions (switch consoles, legacy gear) have no such phase -- plink
@@ -699,40 +371,55 @@ impl SessionRegistry {
         ) {
             state_machine.force_live();
         }
+        self.start_session(NewSession {
+            id, name: session_name, transport, state_machine, raw_rx, log_file_name, out_tx, flow, jump_login, expect,
+        })
+    }
 
+    /// Registers a session and starts the task that takes its output to the
+    /// page (output_reader.rs). The task starts only once the session is in
+    /// the map: its loop ends on the first chunk whose session isn't there,
+    /// so starting it first could lose everything the process said first.
+    fn start_session(&self, new: NewSession) -> Result<()> {
+        let log = new
+            .log_file_name
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .and_then(|p| super::log::SessionLog::open(std::path::Path::new(p), super::log::LogMode::Printable).ok());
+        let subscriber = Arc::new(Mutex::new(Some(new.out_tx)));
+        let replayed_to = Arc::new(AtomicU64::new(0));
+        let instance = NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed);
+        let reader = OutputReader {
+            registry: self.clone(),
+            id: new.id.to_string(),
+            instance,
+            subscriber: subscriber.clone(),
+            replayed_to: replayed_to.clone(),
+            flow: new.flow.clone(),
+            begin_gate: None,
+        };
         let active = ActiveSession {
-            id: id_owned.clone(),
-            name: session_name.to_string(),
-            transport,
-            state_machine,
-            scrollback: ScrollbackRingBuffer::new(2 * 1024 * 1024),
+            id: new.id.to_string(),
+            name: new.name.to_string(),
+            transport: new.transport,
+            state_machine: new.state_machine,
+            scrollback: ScrollbackRingBuffer::new(2 * 1024 * 1024), // 2 MiB
             subscriber,
             replayed_to,
-            log: log_file,
-            flow,
+            log,
+            flow: new.flow,
             instance,
-            jump_login,
-            expect,
+            jump_login: new.jump_login,
+            expect: new.expect,
             tap: None,
             logon: None,
             echoes: Default::default(),
         };
-
-        self.insert_new_session(id_owned, active)?;
-        tokio::spawn(reader);
+        self.insert_new_session(new.id.to_string(), active)?;
+        tokio::spawn(reader.run(new.raw_rx));
         Ok(())
     }
 
-    /// Registers a freshly spawned session, refusing an id that's already
-    /// live. A duplicate start used to silently overwrite the map entry,
-    /// orphaning the first process (and its SSH connection) with no handle
-    /// left to kill it. On conflict the NEW transport is killed instead, so
-    /// the session the user is already looking at is never disturbed.
-    ///
-    /// The reader task is spawned only after this succeeds: its loop exits
-    /// on the first chunk whose session id isn't in the map, so spawning it
-    /// before the insert could lose the whole output stream if the PTY
-    /// spoke first.
     /// Called when a session's output stream ends without a Closed action --
     /// the process exited by itself (the user typed `exit`, or plink quit
     /// without a "FATAL ERROR:" line, e.g. "no valid host name provided").
@@ -758,6 +445,11 @@ impl SessionRegistry {
         }
     }
 
+    /// Registers a freshly spawned session, refusing an id that's already
+    /// live. A duplicate start used to silently overwrite the map entry,
+    /// orphaning the first process (and its SSH connection) with no handle
+    /// left to kill it. On conflict the NEW transport is killed instead, so
+    /// the session the user is already looking at is never disturbed.
     fn insert_new_session(&self, id: String, mut active: ActiveSession) -> Result<()> {
         let mut lock = self.sessions.lock().unwrap();
         if lock.contains_key(&id) {
@@ -1232,10 +924,10 @@ mod logon_tests {
         assert_eq!(info.replay_data, b"R5#show clock\r\n");
         assert_eq!(replayed.load(Ordering::SeqCst), pushed);
         // The chunk the replay already had: not sent.
-        assert!(!send_fresh(&sub, &replayed, pushed, b"R5#show clock\r\n".to_vec()));
+        assert!(!output_reader::send_fresh(&sub, &replayed, pushed, b"R5#show clock\r\n".to_vec()));
         assert!(rx.try_recv().is_err());
         // The next one is.
-        assert!(send_fresh(&sub, &replayed, pushed + 6, b"*10:00".to_vec()));
+        assert!(output_reader::send_fresh(&sub, &replayed, pushed + 6, b"*10:00".to_vec()));
         assert_eq!(rx.try_recv().unwrap(), b"*10:00");
     }
 
