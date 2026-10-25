@@ -11,6 +11,9 @@ export interface PuTTYEventLog {
   level: 'info' | 'warn' | 'error' | 'success';
 }
 
+/** Adds a line to a terminal's event log. */
+export type AddEventLog = (message: string, level?: PuTTYEventLog['level']) => void;
+
 const levelClass = (level: PuTTYEventLog['level']) =>
   level === 'error' ? 'text-rose-400'
     : level === 'warn' ? 'text-amber-400'

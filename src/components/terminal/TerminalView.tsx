@@ -1,5 +1,4 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
-import { askConfirm } from '../../services/confirm';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
@@ -26,10 +25,6 @@ import {
   injectShellIntegration,
   isTauriEnvironment,
   isSessionClosed,
-  vaultGetEntry,
-  vaultIsInitialized,
-  vaultLookup,
-  vaultSendSecret,
   sendBreak,
   readPuttySession,
   listenSessionConnected,
@@ -41,20 +36,16 @@ import {
   setSessionLocked,
   listenScriptLog,
   listenScriptEnded,
-  pastePaced,
   cancelPaste,
-  listenPasteProgress,
   reopenSessionId,
-  VaultLookup,
-  VAULT_CHANGED_EVENT,
 } from '../../services/tauriBridge';
 import {
-  classifyPasswordPrompt, appendRecentOutput, trackTypedInput, isPrivilegeCommand, isCommandSubmission, consoleLoginAction, TypedInput,
+  classifyPasswordPrompt, appendRecentOutput, trackTypedInput, isCommandSubmission,
 } from '../../services/promptDetect';
 import { KeywordHighlighter } from '../../services/keywordHighlight';
 import { shouldTakeHoverFocus } from '../../services/hoverFocus';
 import { useBroadcastGlow, glowColor } from '../../services/broadcast';
-import { SESSION_SAVED_EVENT, SessionSavedDetail, SessionLook, sessionLookFrom, pasteLineDelayFrom, isMultiLinePaste, RECONNECT_DELAYS_S } from '../../services/appEvents';
+import { SESSION_SAVED_EVENT, SessionSavedDetail, SessionLook, sessionLookFrom, pasteLineDelayFrom } from '../../services/appEvents';
 import { useTerminalTheme, findTerminalTheme } from '../../themes/terminalThemes';
 import { useScrollback } from '../../services/scrollback';
 import { newId } from '../../services/ids';
@@ -64,15 +55,18 @@ import { TerminalContextMenu, HookShell } from './TerminalContextMenu';
 import { EventLogDialog, SessionLogDialog, PuTTYEventLog } from './TerminalLogDialogs';
 import { TerminalSearchBar } from './TerminalSearchBar';
 import { TerminalHeader } from './TerminalHeader';
+import { useTerminalVault } from './useTerminalVault';
+import { useTerminalPaste } from './useTerminalPaste';
+import { useAutoReconnect } from './useAutoReconnect';
 import {
   DropOverlay, ConnectingOverlay, HostKeyChangedBar, ConnectionBar, LockedBar, ScriptBar,
   PasteProgressBar, PasswordPromptBar, VaultLockedPromptBar, EnableNoticeBar,
 } from './TerminalStatusBars';
 import { fatalHint, sshBannerHint } from '../../services/fatalHint';
-import { askPaste, needsPasteConfirm } from '../../services/pasteConfirm';
+import { needsPasteConfirm } from '../../services/pasteConfirm';
 import { getMiddleClickPaste } from '../../services/middleClickPaste';
 import { terminalShortcut, keySequenceFor } from '../../services/shortcuts';
-import { readClipboard, writeClipboard, copiedText } from '../../services/clipboard';
+import { writeClipboard, copiedText } from '../../services/clipboard';
 import { DEFAULT_TERMINAL_FONT, loadTerminalFont } from '../../themes/fonts';
 
 interface TerminalViewProps {
@@ -201,6 +195,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     },
   ]);
   const [isEventLogOpen, setIsEventLogOpen] = useState(false);
+  const addEventLog = useCallback((message: string, level: 'info' | 'warn' | 'error' | 'success' = 'info') => {
+    const time = new Date().toTimeString().split(' ')[0];
+    setEventLogs(prev => [...prev.slice(-200), { id: newId('log'), time, message, level }]);
+  }, []);
 
   // PuTTY Session Logging State
   const [isLogging, setIsLogging] = useState(false);
@@ -249,27 +247,16 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const copyOnSelectRef = useRef(copyOnSelect);
   copyOnSelectRef.current = copyOnSelect;
 
-  // Encrypted Vault. The backend decides which entry is this session's
-  // (vault_lookup: an explicit link, or an entry named after the session or
-  // host) and types it itself (vault_send_secret), so the webview never
-  // holds a password to send. This used to fetch the entry once on mount:
-  // unlocking the vault afterwards never reached an open tab, and locking
-  // it didn't stop the tab sending the password it had cached.
-  const [vault, setVault] = useState<VaultLookup | null>(null);
-  const [vaultExists, setVaultExists] = useState(false);
-  const vaultKey = vault?.key ?? null;
-  const isVaultUnlocked = !!vault && !vault.locked;
-  const [isVaultMenuOpen, setIsVaultMenuOpen] = useState(false);
-  const [detectedPasswordPrompt, setDetectedPasswordPrompt] = useState<'login' | 'enable' | null>(null);
-  // Unlocked in place: the notice then offers the saved password for the
-  // prompt still waiting. It used to say "Vault in the top bar".
-  const [unlockOpen, setUnlockOpen] = useState(false);
-  // Unlocking to send the enable password sends it once unlocked.
-  const unlockThenEnableRef = useRef(false);
-  // Asked for the enable password with none saved: says so, and where to add one.
-  const [enableNotice, setEnableNotice] = useState<null | 'none' | 'noVault'>(null);
-  // Typing `enable` with none saved says so once per tab, not every time.
-  const enableHintShownRef = useRef(false);
+  // Encrypted Vault (useTerminalVault.ts).
+  const {
+    vault, vaultExists, vaultKey, isVaultUnlocked, isVaultMenuOpen, setIsVaultMenuOpen,
+    detectedPasswordPrompt, setDetectedPasswordPrompt, unlockOpen, setUnlockOpen, unlockThenEnableRef,
+    enableNotice, setEnableNotice, copiedVaultKey, refreshVault,
+    handleSendVaultPassword, handleSendVaultEnablePassword, requestEnablePassword, requestEnableRef, afterUnlock,
+    handleCopyVaultPassword, handleCopyVaultEnablePassword,
+    typedRef, autoLoginSentRef, commandRunRef, autoRespondRef,
+  } = useTerminalVault(tab, isLocalSession, addEventLog);
+
   // When plink was started and nothing has come back yet. An unreachable
   // host printed nothing for 35 s or more: a black terminal under a green
   // dot and a green "Terminal ready", which read as connected but hung.
@@ -298,198 +285,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
   }, [waitingSince]);
-  const [copiedVaultKey, setCopiedVaultKey] = useState<'login' | 'enable' | null>(null);
   const recentOutputRef = useRef('');
 
-  // "Send it when the device asks" as last saved in this window: the
-  // session file may not be written yet when a lookup reads it.
-  const savedAutoEnableRef = useRef<boolean | undefined>(undefined);
-  const refreshVault = useCallback(async () => {
-    try {
-      const found = await vaultLookup(tab.sessionName, tab.hostname, tab.username);
-      if (savedAutoEnableRef.current !== undefined) found.autoEnable = savedAutoEnableRef.current;
-      setVault(found);
-      if (found.locked) setVaultExists(await vaultIsInitialized());
-    } catch {
-      setVault(null);
-    }
-  }, [tab.sessionName, tab.hostname, tab.username]);
+  // Pasting, paced on a serial line or when the session asks (useTerminalPaste.ts).
+  const isSerial = tab.protocol === 'Serial';
+  const { pasteDelayRef, pasteJob, deliverTypedPaste, pasteFromClipboard, pasteActionsRef } = useTerminalPaste({
+    tab, isSerial, isLivePtyRef, terminalRef, addEventLog, detectedPasswordPrompt, recentOutputRef,
+  });
 
-  useEffect(() => {
-    void refreshVault();
-    const onChange = () => void refreshVault();
-    // The session's settings saved: "Send it when the device asks" and the
-    // entry it uses may have changed.
-    const onSaved = (e: Event) => {
-      const detail = (e as CustomEvent<SessionSavedDetail>).detail;
-      if (detail?.name !== tab.sessionName) return;
-      savedAutoEnableRef.current = detail.autoEnable;
-      void refreshVault();
-    };
-    window.addEventListener(VAULT_CHANGED_EVENT, onChange);
-    window.addEventListener(SESSION_SAVED_EVENT, onSaved);
-    return () => {
-      window.removeEventListener(VAULT_CHANGED_EVENT, onChange);
-      window.removeEventListener(SESSION_SAVED_EVENT, onSaved);
-    };
-  }, [refreshVault, tab.sessionName]);
-
-  const sendVaultSecret = async (field: 'login' | 'enable', key: string | null = vaultKey) => {
-    if (!key) return;
-    const label = field === 'enable' ? 'enable password' : 'password';
-    // Away from a password prompt the device echoes what's typed: at a shell
-    // prompt the password would show on screen, run as a command and land
-    // in the remote history and the session log.
-    if (!detectedPasswordPrompt && !(await askConfirm({
-      title: `Type the ${label} anyway?`,
-      body: `No password prompt is showing. If the device echoes what is typed, the ${label} from "${key}" will be visible, and may land in its history and the session log.`,
-      confirmLabel: `Type ${label}`,
-      danger: true,
-    }))) return;
-    try {
-      await vaultSendSecret(tab.id, key, field);
-      addEventLog(`Sent the ${label} from vault entry "${key}"`, 'info');
-      setDetectedPasswordPrompt(null);
-    } catch (e) {
-      addEventLog(`Vault: ${String(e)}`, 'error');
-      void refreshVault();
-    }
-  };
-  const handleSendVaultPassword = () => sendVaultSecret('login');
-  const handleSendVaultEnablePassword = () => sendVaultSecret('enable');
-
-  /** "Send Enable Password" from the menu or Ctrl+Shift+E. Always offered,
-   *  so it can be found: with none saved it says so and offers to add one;
-   *  with the vault locked it asks to unlock, then sends. */
-  const requestEnablePassword = () => {
-    if (isLocalSession) return;
-    if (vault && !vault.locked && vault.key && vault.hasEnableSecret) {
-      setEnableNotice(null);
-      void sendVaultSecret('enable');
-    } else if (vault?.locked && vaultExists) {
-      unlockThenEnableRef.current = true;
-      setUnlockOpen(true);
-    } else {
-      setEnableNotice(vault?.locked && !vaultExists ? 'noVault' : 'none');
-    }
-  };
-  const requestEnableRef = useRef(requestEnablePassword);
-  requestEnableRef.current = requestEnablePassword;
-
-  // Unlocked to send the enable password: look the entry up again (the
-  // state above is from before) and send it, or say there is none.
-  const afterUnlock = async () => {
-    if (!unlockThenEnableRef.current) return;
-    unlockThenEnableRef.current = false;
-    try {
-      const found = await vaultLookup(tab.sessionName, tab.hostname, tab.username);
-      if (found.key && found.hasEnableSecret) await sendVaultSecret('enable', found.key);
-      else setEnableNotice('none');
-    } catch (e) {
-      addEventLog(`Vault: ${String(e)}`, 'error');
-    }
-  };
-
-  const copyVaultSecret = async (field: 'login' | 'enable') => {
-    if (!vaultKey) return;
-    try {
-      // Fetched for this copy only, never kept.
-      const entry = await vaultGetEntry(vaultKey);
-      const secret = field === 'enable' ? entry?.enable_secret : entry?.secret;
-      if (!secret) {
-        addEventLog('Vault: nothing to copy (is the vault locked?)', 'warn');
-        return;
-      }
-      await writeClipboard(secret);
-      setCopiedVaultKey(field);
-      setTimeout(() => setCopiedVaultKey(null), 2000);
-      // The clear below can't be verified in every webview (reading the
-      // clipboard back may be refused), and clipboard managers keep their own
-      // history -- so the message doesn't promise it.
-      addEventLog(`Copied the ${field === 'enable' ? 'enable ' : ''}password to the clipboard; Thyrion will try to clear it in 25 s. A clipboard manager may keep a copy.`, 'info');
-      setTimeout(async () => {
-        try {
-          if ((await readClipboard()) === secret) await writeClipboard('');
-        } catch {
-          // Can't check it's still ours, so leave the clipboard alone.
-        }
-      }, 25000);
-    } catch (e) {
-      addEventLog(`Vault: ${String(e)}`, 'error');
-    }
-  };
-  const handleCopyVaultPassword = () => copyVaultSecret('login');
-  const handleCopyVaultEnablePassword = () => copyVaultSecret('enable');
-
-  // ---- Automatic answers (opt-in per session) ----------
-  // SSH login needs none of this: plink logs in from the vault by itself.
-  // What's left are prompts the device prints, which the device controls,
-  // so each fires only on something the user did in this tab:
-  //  - enable: right after the user typed enable/en/super (their keystrokes,
-  //    not the echo) and the device asked for a password within 5 s; once.
-  //  - Telnet/serial login: the device's Username:/Password: prompts, once
-  //    each per connection.
-  const typedRef = useRef<TypedInput>({ line: '', submitted: null });
-  const autoLoginSentRef = useRef({ user: false, password: false });
-  // The user has run a command in this connection: automatic console login
-  // is over (promptDetect.ts, consoleLoginAction).
-  const commandRunRef = useRef(false);
-  // Returns true when it answered, so the manual Send chip stays hidden.
-  const autoRespondRef = useRef<(kind: 'login' | 'enable' | null, recent: string) => boolean>(() => false);
-  autoRespondRef.current = (kind, recent) => {
-    const v = vault;
-    const cmd = typedRef.current.submitted;
-    const justAskedForEnable = !!cmd && isPrivilegeCommand(cmd.line) && Date.now() - cmd.at < 5000;
-    // The device asks for an enable password and none is saved: say where
-    // one goes, once per tab. (A locked vault has its own note.)
-    if (kind && justAskedForEnable && !isLocalSession && !enableHintShownRef.current
-        && !(v?.locked && vaultExists) && !(v && !v.locked && v.key && v.hasEnableSecret)) {
-      enableHintShownRef.current = true;
-      setEnableNotice(v?.locked ? 'noVault' : 'none');
-    }
-    if (!v || v.locked || !v.key) return false;
-    const key = v.key;
-    const autoSend = (field: 'login' | 'enable') =>
-      vaultSendSecret(tab.id, key, field)
-        .then(() => addEventLog(`Sent the ${field === 'enable' ? 'enable password' : 'password'} automatically (vault entry "${key}")`, 'info'))
-        .catch(e => addEventLog(`Vault: ${String(e)}`, 'error'));
-
-    if (kind && justAskedForEnable) {
-      if (v.autoEnable && v.hasEnableSecret) {
-        typedRef.current = { ...typedRef.current, submitted: null }; // once per enable
-        void autoSend('enable');
-        return true;
-      }
-      return false; // never answer an enable prompt with the login password
-    }
-    const action = consoleLoginAction({
-      enabled: !!v.autoLogin && (tab.protocol === 'Telnet' || tab.protocol === 'Serial'),
-      commandRun: commandRunRef.current,
-      recent,
-      promptKind: kind,
-      hasUsername: !!v.username,
-      sent: autoLoginSentRef.current,
-    });
-    if (action === 'username' && v.username) {
-      autoLoginSentRef.current.user = true;
-      writeTerminalInput(tab.id, new TextEncoder().encode(v.username + '\r'));
-      addEventLog(`Sent the username automatically (vault entry "${key}")`, 'info');
-      return true;
-    }
-    if (action === 'password') {
-      autoLoginSentRef.current.password = true;
-      void autoSend('login');
-      return true;
-    }
-    return false;
-  };
-
-  // ---- Paste with a delay between lines (T-015) --------------------------
-  // Console ports and network gear drop characters when a config is pasted
-  // at full speed. With the session's "paste line delay" set, a multi-line
-  // paste is sent one line at a time by the backend (paste_paced).
-  const pasteDelayRef = useRef(0);
-  const [pasteJob, setPasteJob] = useState<{ sent: number; total: number } | null>(null);
   // Locked read only (tab menu): keys are dropped here, and the backend
   // refuses every other input. A note says why typing does nothing.
   const lockedRef = useRef(!!tab.locked);
@@ -534,15 +337,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return () => { active = false; window.removeEventListener(SESSION_SAVED_EVENT, onSaved); };
   }, [tab.sessionName]);
 
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-    listenPasteProgress(p => {
-      if (p.sessionId === tab.id) setPasteJob({ sent: p.sent, total: p.total });
-    }).then(u => { if (disposed) u?.(); else unlisten = u; });
-    return () => { disposed = true; unlisten?.(); };
-  }, [tab.id]);
-
   // A script's notes (its stderr) and its end, shown in the terminal only.
   useEffect(() => {
     let disposed = false;
@@ -579,91 +373,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     terminalRef.current?.focus();
   };
 
-  /** Whether a multi-line paste goes line by line: when the session asks
-   *  for a delay, and always on a serial line, where the backend sends each
-   *  line once the device has echoed the last (a console overrun by a paste
-   *  sent flat out drops lines; see session/paste.rs). */
-  const isSerial = tab.protocol === 'Serial';
-  const pacedPaste = (text: string) =>
-    (pasteDelayRef.current > 0 || isSerial) && isLivePtyRef.current && isMultiLinePaste(text);
+  // Reconnect (T-016): restarts the session in this same terminal, like
+  // PuTTY's "Restart Session" (useAutoReconnect.ts).
+  const {
+    restartSessionRef, reconnectAttemptRef, reconnectIn,
+    cancelAutoReconnect, reconnectNow, handleManualReconnect, scheduleAutoReconnectRef,
+  } = useAutoReconnect(addEventLog);
 
-  /** Every paste goes through here: paced when the session asks for it. */
-  const pasteText = async (text: string) => {
-    if (!text) return;
-    if (!isLivePtyRef.current) {
-      terminalRef.current?.write(text);
-      return;
-    }
-    const delay = pasteDelayRef.current;
-    if (pacedPaste(text)) {
-      const total = text.replace(/[\r\n]+$/, '').split(/\r\n|\r|\n/).length;
-      setPasteJob({ sent: 0, total });
-      try {
-        const sent = await pastePaced(tab.id, text, delay);
-        addEventLog(sent < total
-          ? `Paste cancelled after ${sent} of ${total} lines`
-          : isSerial ? `Pasted ${sent} lines, each after the last one's echo` : `Pasted ${sent} lines, ${delay} ms apart`,
-          sent < total ? 'warn' : 'info');
-      } catch (e) {
-        addEventLog(String(e), 'error');
-      } finally {
-        setPasteJob(null);
-      }
-      return;
-    }
-    writeTerminalInput(tab.id, new TextEncoder().encode(text));
-  };
-
-  /** A paste the way the terminal itself sends one: paced when this session
-   *  asks for it, otherwise through xterm (bracketed paste, line endings). */
-  const deliverTypedPaste = async (text: string) => {
-    if (pacedPaste(text)) {
-      await pasteText(text);
-      return;
-    }
-    terminalRef.current?.paste(text);
-  };
-
-  /** Every paste passes the paste window first when Settings asks for it
-   *  (pasteConfirm.ts); `deliver` is how this particular paste is sent. */
-  const confirmThenPaste = async (text: string, deliver: (t: string) => Promise<void>) => {
-    if (!text) return;
-    if (needsPasteConfirm(text)) {
-      const approved = await askPaste({
-        text,
-        target: tab.title,
-        lineDelayMs: pasteDelayRef.current,
-        echoPaced: isSerial,
-        // A password pasted at its prompt stays off the screen until asked.
-        sensitive: !!detectedPasswordPrompt || classifyPasswordPrompt(recentOutputRef.current) !== null,
-      });
-      if (approved === null) return;
-      text = approved;
-    }
-    await deliver(text);
-  };
-
-  /** Reads the clipboard, then pastes through the paste window. */
-  const pasteFromClipboard = async (deliver: (t: string) => Promise<void>) => {
-    let text: string;
-    try {
-      text = await readClipboard();
-    } catch (e) {
-      addEventLog(`Couldn't read the clipboard: ${e}`, 'error');
-      return;
-    }
-    await confirmThenPaste(text, deliver);
-  };
-  // The listeners set up once per terminal reach the current versions here.
-  const pasteActionsRef = useRef({ confirmThenPaste, pasteFromClipboard, deliverTypedPaste, pacedPaste });
-  pasteActionsRef.current = { confirmThenPaste, pasteFromClipboard, deliverTypedPaste, pacedPaste };
-
-  // ---- Reconnect (T-016) ---------------------------------------------------
-  // Restarts the session in this same terminal, like PuTTY's "Restart
-  // Session": the scrollback stays and the new connection continues below.
-  // restartSessionRef is filled in by the mount effect, which owns the
-  // terminal and its output handler.
-  const restartSessionRef = useRef<(() => Promise<void>) | null>(null);
   // Network keyword highlighting (T-017), toggled per tab.
   const highlighterRef = useRef<KeywordHighlighter | null>(null);
   useEffect(() => {
@@ -683,59 +399,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const syncChannelRef = useRef(tab.syncChannel);
   syncChannelRef.current = tab.syncChannel;
   const sshBannerToldRef = useRef(false);
-  const reconnectAttemptRef = useRef(0);
-  const reconnectTimerRef = useRef<number | null>(null);
-  const [reconnectIn, setReconnectIn] = useState<number | null>(null);
   // Lit briefly when a sync broadcast reaches this session (T-012).
   const broadcastGlow = useBroadcastGlow().has(tab.id);
-
-  const cancelAutoReconnect = () => {
-    if (reconnectTimerRef.current !== null) window.clearInterval(reconnectTimerRef.current);
-    reconnectTimerRef.current = null;
-    setReconnectIn(null);
-  };
-
-  const reconnectNow = () => {
-    cancelAutoReconnect();
-    void restartSessionRef.current?.();
-  };
-
-  const handleManualReconnect = () => {
-    reconnectAttemptRef.current = 0;
-    reconnectNow();
-  };
-
-  /**
-   * After a drop from a live session: wait, then restart; the waits grow and
-   * after the last one it stops, so a host that's gone isn't hammered.
-   */
-  const scheduleAutoReconnect = () => {
-    const attempt = reconnectAttemptRef.current + 1;
-    if (attempt > RECONNECT_DELAYS_S.length) {
-      addEventLog(`Gave up reconnecting after ${RECONNECT_DELAYS_S.length} attempts`, 'warn');
-      return;
-    }
-    reconnectAttemptRef.current = attempt;
-    cancelAutoReconnect();
-    let left = RECONNECT_DELAYS_S[attempt - 1];
-    setReconnectIn(left);
-    addEventLog(`Connection lost; reconnecting in ${left} s (attempt ${attempt} of ${RECONNECT_DELAYS_S.length})`, 'warn');
-    reconnectTimerRef.current = window.setInterval(() => {
-      left -= 1;
-      if (left <= 0) reconnectNow();
-      else setReconnectIn(left);
-    }, 1000);
-  };
-  const scheduleAutoReconnectRef = useRef(scheduleAutoReconnect);
-  scheduleAutoReconnectRef.current = scheduleAutoReconnect;
-  useEffect(() => () => {
-    if (reconnectTimerRef.current !== null) window.clearInterval(reconnectTimerRef.current);
-  }, []);
-
-  const addEventLog = useCallback((message: string, level: 'info' | 'warn' | 'error' | 'success' = 'info') => {
-    const time = new Date().toTimeString().split(' ')[0];
-    setEventLogs(prev => [...prev.slice(-200), { id: newId('log'), time, message, level }]);
-  }, []);
 
   useEffect(() => {
     if (!containerRef.current) return;
