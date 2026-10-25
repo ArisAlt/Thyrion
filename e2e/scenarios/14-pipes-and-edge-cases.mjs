@@ -24,25 +24,43 @@ export async function setup({ defer }) {
 
 const setClipboard = (app, text) => app.invoke('write_clipboard_text', { text });
 
-// What the console printed for the last `cmd`: the rows after its echo, up
-// to the prompt that follows, as the screen shows them (no trailing spaces).
-const outputOf = (app, cmd, opts = {}) => app.waitFor((e, echo) => {
+// A unique line sent before a command. Its answer ("you typed: mark 3")
+// marks where that command's output starts: the screen drops trailing
+// spaces, so "include to core " echoes like an earlier "include to core",
+// and on a slow runner the older one was read before the new echo drew.
+let marks = 0;
+async function mark(app, r1) {
+  const m = `mark ${++marks}`;
+  await app.run((e) => e.focusTerminal());
+  await app.type(m);
+  await app.key('Enter');
+  await r1.waitForLine(m);
+  return m;
+}
+
+// What the console printed for `cmd`, sent after mark `m`: the rows after
+// its echo, up to the prompt that follows, as the screen shows them (no
+// trailing spaces).
+const outputOf = (app, cmd, m, opts = {}) => app.waitFor((e, answer, echo) => {
   const rows = e.screen() ?? [];
-  const at = rows.findLastIndex((r) => r === echo);
+  const from = rows.lastIndexOf(answer);
+  if (from < 0) return null;
+  const rest = rows.slice(from + 1);
+  const at = rest.indexOf(echo);
   if (at < 0) return null;
-  const rest = rows.slice(at + 1);
-  const end = rest.indexOf('R1>');
-  return end < 0 ? null : rest.slice(0, end);
-}, [`R1>${cmd}`.trimEnd()], { what: `the output of ${JSON.stringify(cmd)}`, ...opts });
+  const after = rest.slice(at + 1);
+  const end = after.indexOf('R1>');
+  return end < 0 ? null : after.slice(0, end);
+}, [`you typed: ${m}`, `R1>${cmd}`.trimEnd()], { what: `the output of ${JSON.stringify(cmd)}`, ...opts });
 
 // Types a command and Enter; returns its output once the router has the
 // line exactly as typed.
 async function run(app, r1, cmd) {
-  await app.run((e) => e.focusTerminal());
+  const m = await mark(app, r1);
   await app.type(cmd);
   await app.key('Enter');
   await r1.waitForLine(cmd);
-  return outputOf(app, cmd);
+  return outputOf(app, cmd, m);
 }
 
 // Pastes with Ctrl+Shift+V; a paste of several lines is confirmed in the
@@ -136,12 +154,13 @@ export const tests = [
 
   ['a pasted command keeps its trailing space', async ({ app, r1 }) => {
     const cmd = 'show running-config | include to core ';
+    const m = await mark(app, r1);
     r1.clear();
     await paste(app, cmd);
     await r1.waitForBytes(cmd);
     await app.key('Enter');
     await r1.waitForLine(cmd);
-    assert.deepEqual(await outputOf(app, cmd), [' description uplink to core']);
+    assert.deepEqual(await outputOf(app, cmd, m), [' description uplink to core']);
   }],
 
   ['a pasted config keeps every line\'s leading and trailing spaces, and its blank lines', async ({ app, r1 }) => {
