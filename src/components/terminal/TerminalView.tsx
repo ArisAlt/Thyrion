@@ -63,6 +63,7 @@ import { VaultUnlockDialog } from '../vault/VaultUnlockDialog';
 import { HostKeyDialog, storedFingerprint } from './HostKeyDialog';
 import { TerminalContextMenu, HookShell } from './TerminalContextMenu';
 import { EventLogDialog, SessionLogDialog, PuTTYEventLog } from './TerminalLogDialogs';
+import { TerminalSearchBar } from './TerminalSearchBar';
 import { fatalHint, sshBannerHint } from '../../services/fatalHint';
 import { askPaste, needsPasteConfirm } from '../../services/pasteConfirm';
 import { getMiddleClickPaste } from '../../services/middleClickPaste';
@@ -76,8 +77,6 @@ import {
   Sparkles,
   ShieldAlert, 
   Search, 
-  ChevronUp, 
-  ChevronDown, 
   X, 
   Copy, 
   Clipboard, 
@@ -2078,92 +2077,25 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         </div>
       </div>
 
-      {/* Floating In-Buffer Search Bar Overlay */}
       {isSearchOpen && (
-        <div className="absolute top-10 right-4 z-40 flex items-center space-x-1.5 p-2 bg-plinky-900 border border-sky-500/40 rounded-lg shadow-2xl backdrop-blur-md animate-in fade-in slide-in-from-top-2 duration-150 text-xs">
-          <Search className="w-3.5 h-3.5 text-sky-400 ml-1" />
-          <input
-            ref={searchInputRef}
-            type="text"
-            aria-label="Find in terminal"
-              placeholder="Find in terminal…"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                if (e.shiftKey) {
-                  performSearch('prev');
-                } else {
-                  performSearch('next');
-                }
-              }
-            }}
-            className="w-44 bg-plinky-950 border border-plinky-700 rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-sky-500"
-          />
-
-          {/* Search Result Counter */}
-          <span className="text-meta font-mono text-slate-400 px-1 min-w-[50px] text-center">
-            {searchStats ? `${searchStats.index + 1}/${searchStats.total}` : (searchQuery ? '0/0' : '')}
-          </span>
-
-          {/* Direction Navigation */}
-          <button
-            onClick={() => performSearch('prev')}
-            title="Previous Match (Shift+Enter)"
-            className="p-1 rounded hover:bg-plinky-800 text-slate-400 hover:text-white"
-          >
-            <ChevronUp className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={() => performSearch('next')}
-            title="Next Match (Enter)"
-            className="p-1 rounded hover:bg-plinky-800 text-slate-400 hover:text-white"
-          >
-            <ChevronDown className="w-3.5 h-3.5" />
-          </button>
-
-          {/* Match Options Toggles */}
-          <button
-            onClick={() => setCaseSensitive(!caseSensitive)}
-            title="Match Case"
-            className={`px-1.5 py-0.5 rounded text-meta font-bold border transition ${
-              caseSensitive ? 'bg-sky-500/20 text-sky-300 border-sky-500/50' : 'text-plinky-muted border-transparent hover:text-slate-300'
-            }`}
-          >
-            Aa
-          </button>
-          <button
-            onClick={() => setWholeWord(!wholeWord)}
-            title="Match Whole Word"
-            className={`px-1.5 py-0.5 rounded text-meta font-bold border transition ${
-              wholeWord ? 'bg-sky-500/20 text-sky-300 border-sky-500/50' : 'text-plinky-muted border-transparent hover:text-slate-300'
-            }`}
-          >
-            \b
-          </button>
-          <button
-            onClick={() => setIsRegex(!isRegex)}
-            title="Use Regular Expression"
-            className={`px-1.5 py-0.5 rounded text-meta font-bold border transition ${
-              isRegex ? 'bg-sky-500/20 text-sky-300 border-sky-500/50' : 'text-plinky-muted border-transparent hover:text-slate-300'
-            }`}
-          >
-            .*
-          </button>
-
-          {/* Close Search */}
-          <button
-            onClick={() => {
-              setIsSearchOpen(false);
-              searchAddonRef.current?.clearDecorations();
-              terminalRef.current?.focus();
-            }}
-            title="Close Search (Esc)"
-            className="p-1 text-plinky-muted hover:text-rose-400 ml-1"
-          >
-            <X className="w-3.5 h-3.5" />
-          </button>
-        </div>
+        <TerminalSearchBar
+          inputRef={searchInputRef}
+          query={searchQuery}
+          onQueryChange={setSearchQuery}
+          stats={searchStats}
+          onFind={performSearch}
+          options={{ caseSensitive, wholeWord, isRegex }}
+          onToggle={(option) => {
+            if (option === 'caseSensitive') setCaseSensitive(!caseSensitive);
+            else if (option === 'wholeWord') setWholeWord(!wholeWord);
+            else setIsRegex(!isRegex);
+          }}
+          onClose={() => {
+            setIsSearchOpen(false);
+            searchAddonRef.current?.clearDecorations();
+            terminalRef.current?.focus();
+          }}
+        />
       )}
 
       {/* Terminal Viewport */}
