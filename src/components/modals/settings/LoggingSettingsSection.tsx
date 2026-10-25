@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { ScrollText } from 'lucide-react';
-import { getLoggingSettings, setLoggingSettings, pickLogFolder, LoggingSettings } from '../../services/tauriBridge';
+import { getLoggingSettings, setLoggingSettings, pickLogFolder, LoggingSettings } from '../../../services/tauriBridge';
 
 /** Settings > Logging: every session logged to a file of its own, by folder,
  *  session and time, without a click each time. A session can choose for
