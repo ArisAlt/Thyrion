@@ -1,36 +1,28 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { PuttySession, Protocol } from '../../types/session';
-import { 
-  Terminal, X, Save, Key, Folder, Tag, Cpu, RefreshCw, 
-  Shield, Server, Laptop, ArrowRight, Lock, Trash2
-} from 'lucide-react';
-import { 
-  listSerialPorts, DetectedSerialPort, 
+import { Terminal, X, Save } from 'lucide-react';
+import {
+  listSerialPorts, DetectedSerialPort,
   vaultListEntriesMeta, vaultSetEntry, VaultEntryMeta, VaultEntry,
   vaultIsInitialized, vaultIsUnlocked, vaultGetEntry, vaultDelete,
   VAULT_CHANGED_EVENT,
 } from '../../services/tauriBridge';
 import { VaultUnlockDialog } from '../vault/VaultUnlockDialog';
-import { LOGON_PRESETS, withPreset } from '../../services/logonPresets';
 import { sessionsUsingVaultEntry } from '../../services/vaultKeys';
-import { TAB_COLORS, LogonAction, parseLogonActions, serializeLogonActions } from '../../services/tabColors';
-import { TERMINAL_THEMES, MATCH_INTERFACE, findTerminalTheme, useTerminalTheme } from '../../themes/terminalThemes';
-import { TERMINAL_FONTS, DEFAULT_TERMINAL_FONT } from '../../themes/fonts';
-import { TerminalSchemePreview } from '../common/TerminalSchemePreview';
-import { SESSION_SAVED_EVENT, SessionSavedDetail, sessionLookFrom, MAX_PASTE_LINE_DELAY_MS, pasteLineDelayFrom, keepaliveSecondsFrom, keepaliveKeys } from '../../services/appEvents';
+import { LogonAction, parseLogonActions, serializeLogonActions } from '../../services/tabColors';
+import { SESSION_SAVED_EVENT, SessionSavedDetail, sessionLookFrom, pasteLineDelayFrom, keepaliveSecondsFrom, keepaliveKeys } from '../../services/appEvents';
+import { GeneralTab } from './session/GeneralTab';
+import { CredentialsTab } from './session/CredentialsTab';
+import { JumpHostTab } from './session/JumpHostTab';
+import { SerialTab } from './session/SerialTab';
+import { AppearanceTab } from './session/AppearanceTab';
+import { AdvancedTab } from './session/AdvancedTab';
+import { VaultState, AutoLog } from './session/types';
 
 export type SessionTab = 'general' | 'credentials' | 'jump' | 'serial' | 'appearance' | 'advanced';
 
 /** The hop command a router jump types (NX-OS syntax; the backend's default too). */
 const DEFAULT_HOP_COMMAND = 'ssh {user}@{host}';
-const HOP_PRESETS: { label: string; command: string }[] = [
-  { label: 'NX-OS / Linux', command: 'ssh {user}@{host}' },
-  { label: 'IOS / IOS-XE', command: 'ssh -l {user} {host}' },
-  { label: 'Telnet', command: 'telnet {host}' },
-];
-
-/** Each protocol's usual port, as PuTTY fills it in. */
-const DEFAULT_PORT: Partial<Record<Protocol, number>> = { SSH: 22, Telnet: 23, Rlogin: 513 };
 
 const NO_VAULT_MESSAGE =
   'There is no vault yet, so the password was not saved. Create one first: Vault in the top bar, set a master password, then save this session again.';
@@ -91,7 +83,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
   // Whether there is a vault to save into. On a first run there is none:
   // saving a password failed with "Vault is locked ... unlock the vault",
   // pointing at something that didn't exist yet.
-  const [vaultState, setVaultState] = useState<'unknown' | 'none' | 'locked' | 'ready'>('unknown');
+  const [vaultState, setVaultState] = useState<VaultState>('unknown');
   const checkVault = async () => {
     try {
       if (!(await vaultIsInitialized())) setVaultState('none');
@@ -106,7 +98,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
   // Paste line delay in ms ('' or 0 = paste normally).
   const [pasteDelay, setPasteDelay] = useState('');
   // Automatic log (PlinkyAutoLog): follow Settings > Logging, always, never.
-  const [autoLog, setAutoLog] = useState<'global' | 'always' | 'never'>('global');
+  const [autoLog, setAutoLog] = useState<AutoLog>('global');
   // Connection (T-016): PuTTY's keepalive settings and Thyrion's auto-reconnect.
   const [keepalive, setKeepalive] = useState('');
   const [tcpKeepalives, setTcpKeepalives] = useState(false);
@@ -118,11 +110,6 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
   const [lookScheme, setLookScheme] = useState('');
   const [lookFont, setLookFont] = useState('');
   const [lookSize, setLookSize] = useState('');
-  // The preview shows what this session will look like: its own choice, or
-  // Settings' default where it has none.
-  const defaultScheme = useTerminalTheme();
-  const storedFont = (() => { try { return localStorage.getItem('plinky_terminal_font') || DEFAULT_TERMINAL_FONT; } catch { return DEFAULT_TERMINAL_FONT; } })();
-  const storedSize = (() => { try { const n = Number(localStorage.getItem('plinky_terminal_font_size')); return n >= 8 && n <= 32 ? n : 14; } catch { return 14; } })();
 
   // Serial-specific state
   const [serialPorts, setSerialPorts] = useState<DetectedSerialPort[]>([]);
@@ -640,25 +627,12 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
   };
 
   const isSerial = protocol === 'Serial';
-  // The key typed is one the vault already holds (or this session's own):
-  // a blank password then keeps the stored one.
-  const typedKey = vaultKeyId.trim();
-  const keyIsSaved = !!typedKey && (typedKey === savedVaultKey || vaultEntries.some(v => v.id === typedKey));
   // The other saved sessions that use vault entry `key`: linked to it, or
   // finding it under one of the backend's fallback names (a bare session
   // name, user@host, host). Only the link and "session:<name>" were
   // counted, so an entry shared through a fallback name was deleted.
   const vaultEntryUsers = (key: string) =>
     sessionsUsingVaultEntry(key, savedSessions, new Set(vaultEntries.map(v => v.id)), editingSession?.name);
-  // The entry the enable password comes from, and whether it has one.
-  const enableEntryKey = useVault ? (vaultMode === 'link' ? selectedVaultKey : typedKey) : '';
-  const enableSaved = !!enableEntryKey && !!vaultEntries.find(v => v.id === enableEntryKey)?.has_enable_secret;
-  const hasEnable = !!vaultEnablePassword || (enableSaved && !removeEnable);
-  // Removing the enable password from an entry that has nothing else
-  // leaves it empty: saving then deletes it, or unlinks a shared one.
-  const enableOnly = enableSaved && vaultEntries.find(v => v.id === enableEntryKey)?.has_login_secret === false && !vaultPassword;
-  const enableEntryShared = enableOnly ? vaultEntryUsers(enableEntryKey) : [];
-  const enableEditable = !useVault || vaultMode === 'new';
 
   // The tabs this protocol has. A dot marks one holding non-default settings.
   const visibleTabs: { id: SessionTab; label: string; on?: boolean }[] = [
@@ -745,988 +719,52 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
               inside; short screens get less, never more than fits. */}
           <div className="p-4 overflow-y-auto h-[min(440px,calc(100vh-220px))] shrink-0">
             <div data-tab="general" hidden={tab !== 'general'} className="space-y-3">
-              {/* Protocol Selection */}
-              <div className="space-y-1">
-                <label htmlFor="new-session-modal-connection-protocol" className="text-slate-300 font-medium">Connection Protocol</label>
-                <select id="new-session-modal-connection-protocol"
-                  value={protocol}
-                  onChange={e => {
-                    const nextProto = e.target.value as Protocol;
-                    // The port follows the protocol while it is still the old
-                    // one's default: a Telnet copy switched to SSH kept 23.
-                    const was = DEFAULT_PORT[protocol];
-                    const next = DEFAULT_PORT[nextProto];
-                    if (next && (!port.trim() || (was && port.trim() === String(was)))) setPort(String(next));
-                    setProtocol(nextProto);
-                    if (nextProto === 'Serial') {
-                      if (serialPorts.length > 0 && !serialLine) {
-                        const firstUsb = serialPorts.find(p => p.is_usb);
-                        setSerialLine(firstUsb ? firstUsb.port_name : serialPorts[0].port_name);
-                      }
-                    }
-                  }}
-                  className="w-full bg-plinky-950 border border-plinky-700 rounded px-2 py-1.5 text-slate-100 focus:outline-none focus:border-sky-500"
-                >
-                  <option value="SSH">SSH (Secure Shell)</option>
-                  <option value="Serial">Serial (USB / COM Port)</option>
-                  <option value="Telnet">Telnet</option>
-                  <option value="Rlogin">Rlogin</option>
-                  <option value="RAW">RAW</option>
-                </select>
-              </div>
-
-              {/* SERIAL PROTOCOL FIELDS */}
-              {isSerial ? (
-                <div className="p-3 bg-plinky-950/70 border border-plinky-800 rounded-md space-y-3">
-                  <div className="flex items-center space-x-2 text-slate-300 font-medium pb-1 border-b border-plinky-800">
-                    <Cpu className="w-3.5 h-3.5 text-slate-400" />
-                    <span>Serial Port & Hardware Line Settings</span>
-                  </div>
-
-                  <div className="grid grid-cols-3 gap-2">
-                    <div className="col-span-2 space-y-1">
-                      <div className="flex items-center justify-between">
-                        <label className="text-slate-300 text-meta">Serial Line (COM / USB Port) *</label>
-                        <button
-                          type="button"
-                          onClick={refreshPorts}
-                          title="Scan for plugged-in USB and serial devices"
-                          className="text-slate-400 hover:text-sky-400 flex items-center space-x-1 text-meta transition"
-                        >
-                          <RefreshCw className={`w-2.5 h-2.5 ${isRefreshingPorts ? 'animate-spin text-sky-400' : ''}`} />
-                          <span>Refresh</span>
-                        </button>
-                      </div>
-                      {isCustomSerialLine ? (
-                        <div className="flex items-center space-x-1">
-                          <input
-                            type="text"
-                            required
-                            aria-label="Serial line"
-                            placeholder="/dev/ttyUSB0 or COM3"
-                            value={serialLine}
-                            onChange={e => setSerialLine(e.target.value)}
-                            className="w-full bg-plinky-900 border border-plinky-700 rounded px-2 py-1 text-slate-100 font-mono text-xs focus:outline-none focus:border-sky-500"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => setIsCustomSerialLine(false)}
-                            className="px-2 py-1 rounded bg-plinky-800 text-slate-300 hover:bg-plinky-700 text-meta"
-                          >
-                            List
-                          </button>
-                        </div>
-                      ) : (
-                        <select
-                          aria-label="Serial line"
-                          value={serialLine}
-                          onChange={e => {
-                            if (e.target.value === '__custom__') {
-                              setIsCustomSerialLine(true);
-                            } else {
-                              setSerialLine(e.target.value);
-                            }
-                          }}
-                          className="w-full bg-plinky-900 border border-plinky-700 rounded px-2 py-1 text-slate-100 font-mono text-xs focus:outline-none focus:border-sky-500"
-                        >
-                          {/* Every detected port is plugged in right now (●). A
-                              saved port that isn't gets its own entry (○): with
-                              no matching option the select showed some other
-                              port while still saving this one. */}
-                          {serialLine && !serialPorts.some(p => p.port_name === serialLine) && (
-                            <option value={serialLine}>{`○ ${serialLine} (not connected)`}</option>
-                          )}
-                          {serialPorts.length === 0 ? (
-                            <option value="" disabled>No serial devices detected</option>
-                          ) : (
-                            serialPorts.map(p => (
-                              <option key={p.port_name} value={p.port_name}>
-                                {`● ${p.display_name}`}
-                              </option>
-                            ))
-                          )}
-                          <option value="__custom__">Manual path / Custom COM port...</option>
-                        </select>
-                      )}
-                    </div>
-
-                    <div className="space-y-1">
-                      <label htmlFor="new-session-modal-speed-baud" className="text-slate-300 text-meta">Speed (Baud)</label>
-                      <select id="new-session-modal-speed-baud"
-                        value={serialSpeed}
-                        onChange={e => setSerialSpeed(e.target.value)}
-                        className="w-full bg-plinky-900 border border-plinky-700 rounded px-2 py-1 text-slate-100 font-mono text-xs focus:outline-none focus:border-sky-500"
-                      >
-                        <option value="9600">9600</option>
-                        <option value="19200">19200</option>
-                        <option value="38400">38400</option>
-                        <option value="57600">57600</option>
-                        <option value="115200">115200 (Network)</option>
-                        <option value="230400">230400</option>
-                        <option value="921600">921600</option>
-                      </select>
-                    </div>
-                  </div>
-
-                </div>
-              ) : (
-                /* NETWORK PROTOCOL FIELDS (SSH / Telnet / RAW / Rlogin) */
-                <>
-                  <div className="grid grid-cols-3 gap-2">
-                    <div className="col-span-2 space-y-1">
-                      <label htmlFor="new-session-modal-host-name-or-ip-address" className="text-slate-300 font-medium">Host Name or IP Address *</label>
-                      <input id="new-session-modal-host-name-or-ip-address"
-                        type="text"
-                        required
-                        placeholder="192.0.2.10 or router.internal"
-                        value={hostname}
-                        onChange={e => setHostname(e.target.value)}
-                        className="w-full bg-plinky-950 border border-plinky-700 rounded px-2.5 py-1.5 text-slate-100 placeholder-plinky-muted font-mono focus:outline-none focus:border-sky-500"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label htmlFor="new-session-modal-port" className="text-slate-300 font-medium">Port</label>
-                      <input id="new-session-modal-port"
-                        type="number"
-                        value={port}
-                        onChange={e => setPort(e.target.value)}
-                        className="w-full bg-plinky-950 border border-plinky-700 rounded px-2.5 py-1.5 text-slate-100 font-mono focus:outline-none focus:border-sky-500"
-                      />
-                    </div>
-                  </div>
-                  {(protocol === 'Telnet' || protocol === 'RAW') && port.trim() === '22' && (
-                    <div role="status" className="flex items-center justify-between gap-2 p-2 rounded border border-amber-500/40 bg-amber-950/30 text-amber-300 text-meta">
-                      <span>Port 22 is SSH's port. A {protocol === 'RAW' ? 'Raw' : 'Telnet'} session there gets the SSH greeting and is closed.</span>
-                      <button
-                        type="button"
-                        onClick={() => setProtocol('SSH')}
-                        className="shrink-0 px-2 py-0.5 rounded border border-amber-500/50 text-amber-200 hover:bg-amber-500/10"
-                      >
-                        Use SSH
-                      </button>
-                    </div>
-                  )}
-                </>
-              )}
-
-              {/* Session name: after the host, as in PuTTY */}
-              <div className="space-y-1">
-                <label htmlFor="new-session-modal-session-name" className="text-slate-300 font-medium">Session name</label>
-                <input id="new-session-modal-session-name"
-                  type="text"
-                  placeholder={(isSerial ? serialLine.trim() : hostname.trim()) || (isSerial ? 'e.g. core-sw1 console' : 'Defaults to the host name')}
-                  value={name}
-                  onChange={e => { setName(e.target.value); setNameError(null); }}
-                  className="w-full bg-plinky-950 border border-plinky-700 rounded px-2.5 py-1.5 text-slate-100 placeholder-plinky-muted focus:outline-none focus:border-sky-500"
-                />
-                {nameError && (
-                  <p role="alert" className="text-rose-400 text-meta">{nameError}</p>
-                )}
-                {editingSession && name.trim() !== editingSession.name && (
-                  <p className="text-amber-400 text-meta">
-                    Changing the name saves a new session. "{editingSession.name}" stays as it is.
-                  </p>
-                )}
-              </div>
-
-              {/* Organization & Tags */}
-              <div className="grid grid-cols-2 gap-2">
-                <div className="space-y-1">
-                  <label htmlFor="new-session-modal-folder-category" className="text-slate-300 font-medium flex items-center space-x-1">
-                    <Folder className="w-3.5 h-3.5 text-sky-400" />
-                    <span>Folder Category</span>
-                  </label>
-                  <input id="new-session-modal-folder-category"
-                    type="text"
-                    placeholder="e.g. Staging or Network"
-                    value={folder}
-                    onChange={e => setFolder(e.target.value)}
-                    className="w-full bg-plinky-950 border border-plinky-700 rounded px-2.5 py-1.5 text-slate-100 placeholder-plinky-muted focus:outline-none focus:border-sky-500"
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <label htmlFor="new-session-modal-tags-comma-separated" className="text-slate-300 font-medium flex items-center space-x-1">
-                    <Tag className="w-3.5 h-3.5 text-slate-400" />
-                    <span>Tags (comma-separated)</span>
-                  </label>
-                  <input id="new-session-modal-tags-comma-separated"
-                    type="text"
-                    placeholder="cisco, core, serial, lab"
-                    value={tags}
-                    onChange={e => setTags(e.target.value)}
-                    className="w-full bg-plinky-950 border border-plinky-700 rounded px-2.5 py-1.5 text-slate-100 placeholder-plinky-muted focus:outline-none focus:border-sky-500"
-                  />
-                </div>
-              </div>
-
-              {/* Tab colour (tabColors.ts) */}
-              <div className="space-y-1">
-                <span className="text-slate-300 font-medium">Tab colour</span>
-                <div role="radiogroup" aria-label="Tab colour" className="flex items-center space-x-1.5">
-                  <button
-                    type="button"
-                    role="radio"
-                    aria-checked={tabColor === ''}
-                    onClick={() => setTabColor('')}
-                    className={`px-2 py-0.5 rounded border text-meta ${tabColor === '' ? 'border-sky-500 text-sky-300' : 'border-plinky-700 text-slate-400'}`}
-                  >
-                    None
-                  </button>
-                  {TAB_COLORS.map(c => (
-                    <button
-                      key={c.id}
-                      type="button"
-                      role="radio"
-                      aria-checked={tabColor === c.id}
-                      aria-label={c.label}
-                      title={c.label}
-                      onClick={() => setTabColor(c.id)}
-                      style={{ backgroundColor: c.hex }}
-                      className={`w-5 h-5 rounded-full border-2 ${tabColor === c.id ? 'border-white' : 'border-transparent'}`}
-                    />
-                  ))}
-                </div>
-                <p className="text-meta text-plinky-muted">Marks this session's tabs and its row in the list, for example red for production.</p>
-              </div>
+              <GeneralTab {...{
+                protocol, setProtocol, port, setPort, hostname, setHostname, name, setName, nameError,
+                setNameError, editingSession, folder, setFolder, tags, setTags, tabColor, setTabColor,
+                serialPorts, refreshPorts, isRefreshingPorts, serialLine, setSerialLine, isCustomSerialLine,
+                setIsCustomSerialLine, serialSpeed, setSerialSpeed
+              }} />
             </div>
 
             <div data-tab="credentials" hidden={tab !== 'credentials'} className="space-y-3">
-                  {!isSerial && (
-                    <div className="space-y-1">
-                      <label htmlFor="new-session-modal-default-username" className="text-slate-300 font-medium">Username</label>
-                      <input id="new-session-modal-default-username"
-                        type="text"
-                        autoComplete="off"
-                        placeholder="e.g. root, admin, or deploy"
-                        value={username}
-                        onChange={e => setUsername(e.target.value)}
-                        className="w-full bg-plinky-950 border border-plinky-700 rounded px-2.5 py-1.5 text-slate-100 placeholder-plinky-muted focus:outline-none focus:border-sky-500"
-                      />
-                    </div>
-                  )}
-                  {protocol === 'SSH' && (
-                    <div className="space-y-1">
-                      <label htmlFor="new-session-modal-private-key-file-ppk" className="text-slate-300 font-medium flex items-center space-x-1">
-                        <Key className="w-3.5 h-3.5 text-slate-400" />
-                        <span>Private Key File (.ppk)</span>
-                      </label>
-                      <input id="new-session-modal-private-key-file-ppk"
-                        type="text"
-                        placeholder="/path/to/key.ppk (or Pageant/agent will handle auth)"
-                        value={publicKeyFile}
-                        onChange={e => setPublicKeyFile(e.target.value)}
-                        className="w-full bg-plinky-950 border border-plinky-700 rounded px-2.5 py-1.5 text-slate-100 placeholder-plinky-muted font-mono focus:outline-none focus:border-sky-500"
-                      />
-                    </div>
-                  )}
-              {/* ENCRYPTED VAULT CREDENTIALS SECTION */}
-              <div className="p-3 bg-plinky-950/70 border border-plinky-800 rounded-md space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <label className="flex items-center space-x-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={useVault}
-                      onChange={e => setUseVault(e.target.checked)}
-                      className="rounded border-plinky-700 text-sky-500 focus:ring-0 bg-plinky-900"
-                    />
-                    <span className="text-slate-200 font-medium flex items-center space-x-1.5">
-                      <Lock className="w-3.5 h-3.5 text-slate-400" />
-                      <span>Save Credentials in Encrypted Vault</span>
-                    </span>
-                  </label>
-                  {useVault && (
-                    <span className="text-meta text-slate-400 font-mono">
-                      Argon2id + AES-256-GCM
-                    </span>
-                  )}
-                </div>
-                {useVault && vaultState === 'none' && (
-                  <div role="status" className="flex items-center justify-between gap-2 p-2 rounded border border-amber-500/40 bg-amber-950/30 text-amber-300 text-meta">
-                    <span>No vault yet, so a password here can't be saved. Create one now, or Save asks for it.</span>
-                    <button
-                      type="button"
-                      onClick={() => setUnlockFor('edit')}
-                      className="shrink-0 px-2 py-0.5 rounded border border-amber-500/50 text-amber-200 hover:bg-amber-500/10"
-                    >
-                      Create vault…
-                    </button>
-                  </div>
-                )}
-                {useVault && vaultState === 'locked' && (
-                  <div role="status" className="flex items-center justify-between gap-2 p-2 rounded border border-amber-500/40 bg-amber-950/30 text-amber-300 text-meta">
-                    <span>The vault is locked, so this session's password can't be read or saved.</span>
-                    <button
-                      type="button"
-                      onClick={() => setUnlockFor('edit')}
-                      className="shrink-0 px-2 py-0.5 rounded border border-amber-500/50 text-amber-200 hover:bg-amber-500/10"
-                    >
-                      Unlock…
-                    </button>
-                  </div>
-                )}
-
-                {useVault && (
-                  <div className="space-y-2.5 pt-1 border-t border-plinky-800/80 animate-in fade-in duration-150">
-
-                    {vaultMode === 'link' ? (
-                      <div className="space-y-1">
-                        <label htmlFor="new-session-modal-select-vault-credential" className="text-slate-300 text-meta">Select Vault Credential *</label>
-                        <select id="new-session-modal-select-vault-credential"
-                          value={selectedVaultKey}
-                          onChange={e => setSelectedVaultKey(e.target.value)}
-                          className="w-full bg-plinky-900 border border-plinky-700 rounded px-2 py-1 text-slate-100 text-xs focus:outline-none focus:border-sky-500 font-mono"
-                        >
-                          <option value="" disabled>-- Select a vault credential --</option>
-                          {vaultEntries.map(e => (
-                            <option key={e.id} value={e.id}>
-                              {e.id} {e.username ? `(${e.username})` : ''} {e.has_enable_secret ? '· enable password' : ''}
-                            </option>
-                          ))}
-                        </select>
-                        {vaultEntries.length === 0 && (
-                          <p className="text-amber-400 text-meta">
-                            No credentials found in vault (or vault is locked). You can switch to "Create New Vault Entry".
-                          </p>
-                        )}
-                      </div>
-                    ) : (
-                      <div className="space-y-2">
-                        <div className="grid grid-cols-2 gap-2">
-                          <div className="space-y-1">
-                            <label htmlFor="new-session-modal-vault-key-id" className="text-slate-300 text-meta">Vault Key ID</label>
-                            <input id="new-session-modal-vault-key-id"
-                              type="text"
-                              value={vaultKeyId}
-                              onChange={e => setVaultKeyId(e.target.value)}
-                              placeholder={name.trim() ? `session:${name.trim()}` : 'session:device-name'}
-                              className="w-full bg-plinky-900 border border-plinky-700 rounded px-2 py-1 text-slate-100 font-mono text-xs focus:outline-none focus:border-sky-500"
-                            />
-                          </div>
-                          <div className="space-y-1">
-                            <label htmlFor="new-session-modal-login-password" className="text-slate-300 text-meta">
-                              {keyIsSaved || vaultEnablePassword ? 'Login Password' : 'Login Password *'}
-                            </label>
-                            <input id="new-session-modal-login-password"
-                              type="password"
-                              // WebView2 filled a remembered password in here
-                              // on edit, and Save wrote it over the vault's.
-                              autoComplete="new-password"
-                              value={vaultPassword}
-                              onChange={e => setVaultPassword(e.target.value)}
-                              placeholder={keyIsSaved ? 'Saved. Type to replace' : 'Session login password...'}
-                              className="w-full bg-plinky-900 border border-plinky-700 rounded px-2 py-1 text-slate-100 font-mono text-xs focus:outline-none focus:border-sky-500"
-                            />
-                          </div>
-                        </div>
-
-                      </div>
-                    )}
-
-                    {/* Mode toggle, under the fields it switches */}
-                    <div className="flex items-center space-x-2 text-xs">
-                      <button
-                        type="button"
-                        onClick={() => setVaultMode('new')}
-                        className={`flex-1 py-1 px-2 rounded border text-center font-medium transition ${
-                          vaultMode === 'new'
-                            ? 'bg-sky-500/20 text-sky-300 border-sky-500/50'
-                            : 'bg-plinky-900 text-slate-400 border-plinky-700 hover:text-slate-300'
-                        }`}
-                      >
-                        Create New Vault Entry
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setVaultMode('link')}
-                        className={`flex-1 py-1 px-2 rounded border text-center font-medium transition ${
-                          vaultMode === 'link'
-                            ? 'bg-sky-500/20 text-sky-300 border-sky-500/50'
-                            : 'bg-plinky-900 text-slate-400 border-plinky-700 hover:text-slate-300'
-                        }`}
-                      >
-                        Link to Existing Vault Entry
-                      </button>
-                    </div>
-
-                    <p className="flex items-center gap-1.5 text-meta text-slate-400">
-                      <Lock className="w-3 h-3 shrink-0 text-plinky-muted" aria-hidden="true" />
-                      <span>Stored encrypted in the vault, never in PuTTY's session files.</span>
-                    </p>
-                  </div>
-                )}
-              </div>
-
-              {/* The enable password: its own block, always shown, so it is
-                  plain where it goes. It used to sit behind "Save credentials",
-                  "Create new entry" and a "Network Device" box. Stored in the
-                  session's vault entry (enable_secret) like the login password;
-                  the automatic switch is PlinkyAutoEnable in the session file. */}
-              <section aria-labelledby="new-session-modal-enable-heading" className="p-3 bg-plinky-950/70 border border-plinky-800 rounded-md space-y-2 text-meta">
-                <h3 id="new-session-modal-enable-heading" className="text-slate-200 text-xs font-medium flex items-center gap-1.5">
-                  <Shield className="w-3.5 h-3.5 text-slate-400" aria-hidden="true" />
-                  <span>Privileged mode (enable)</span>
-                </h3>
-                {enableEditable ? (
-                  <div className="space-y-1">
-                    <label htmlFor="new-session-modal-enable-password" className="block text-slate-300">Enable password</label>
-                    <div className="flex items-center gap-2">
-                      <input id="new-session-modal-enable-password"
-                        type="password"
-                        autoComplete="new-password"
-                        aria-describedby="new-session-modal-enable-help"
-                        value={vaultEnablePassword}
-                        onChange={e => {
-                          setVaultEnablePassword(e.target.value);
-                          // Saving it needs the vault: typing here is asking for that.
-                          if (e.target.value && !useVault) { setUseVault(true); setVaultMode('new'); }
-                          if (e.target.value) setRemoveEnable(false);
-                        }}
-                        placeholder={enableSaved && !removeEnable ? 'Saved. Type to replace' : 'For routers, switches and firewalls'}
-                        className="flex-1 min-w-0 bg-plinky-900 border border-plinky-700 rounded px-2 py-1 text-slate-100 font-mono text-xs placeholder-plinky-muted focus:outline-none focus:border-sky-500"
-                      />
-                      {enableSaved && !removeEnable && !vaultEnablePassword && (
-                        <button
-                          type="button"
-                          onClick={() => setRemoveEnable(true)}
-                          className="shrink-0 flex items-center gap-1 px-2 py-1 rounded border border-plinky-700 text-slate-300 hover:border-rose-500/50 hover:text-rose-300"
-                        >
-                          <Trash2 className="w-3 h-3" aria-hidden="true" />
-                          <span>Remove</span>
-                        </button>
-                      )}
-                    </div>
-                    {removeEnable && (
-                      <p role="status" className="flex items-center gap-2 text-amber-300">
-                        <span>
-                          {!enableOnly
-                            ? 'The enable password is removed from the vault when you save.'
-                            : enableEntryShared.length === 0
-                              ? 'It is this entry\'s only password, so saving deletes the vault entry and unlinks this session.'
-                              : `It is this entry's only password and ${enableEntryShared.join(', ')} also ${enableEntryShared.length === 1 ? 'uses' : 'use'} it, so saving only unlinks this session.`}
-                        </span>
-                        <button type="button" onClick={() => setRemoveEnable(false)} className="underline hover:text-amber-200">Keep it</button>
-                      </p>
-                    )}
-                  </div>
-                ) : (
-                  <p className="text-slate-300">
-                    {enableSaved
-                      ? <>Comes from vault entry <span className="font-mono">{enableEntryKey}</span>.</>
-                      : <>Vault entry <span className="font-mono">{enableEntryKey || '(none picked)'}</span> has no enable password.</>}
-                    {' '}Change it in Vault, in the top bar.
-                  </p>
-                )}
-                <p id="new-session-modal-enable-help" className="text-plinky-muted">
-                  The password the device asks for after you type <code className="text-slate-300">enable</code>.
-                  It is kept in the vault with this session's login{protocol === 'SSH' && enableJumpHost ? ' and only ever sent to this device, never to the jump host' : ''}.
-                  Leave it empty for servers.
-                </p>
-                <label className="flex items-start gap-2 cursor-pointer">
-                  <input type="checkbox" checked={autoEnable} onChange={e => setAutoEnable(e.target.checked)} className="mt-0.5" aria-describedby="new-session-modal-auto-enable-help" />
-                  <span className="text-slate-300">
-                    Send it when the device asks
-                    <span id="new-session-modal-auto-enable-help" className="block text-plinky-muted">
-                      Only right after you type <code>enable</code>, <code>en</code> or <code>super</code> and the device answers <code>Password:</code>.
-                      Leave off if you connect from this device to others: they would be sent this password too.
-                    </span>
-                  </span>
-                </label>
-                {autoEnable && !hasEnable && enableEditable && (
-                  <p role="status" className="text-amber-300">No enable password saved yet, so there is nothing to send. Type it above.</p>
-                )}
-                <p className="text-plinky-muted">
-                  To send it yourself: right-click the terminal, then <span className="text-slate-300">Send Enable Password</span>, or press{' '}
-                  <kbd className="px-1 rounded border border-plinky-700 text-slate-300 font-mono">Ctrl+Shift+E</kbd>.
-                </p>
-              </section>
-
-              {/* Automatic answers from the vault. SSH needs no switch: plink
-                  logs in by itself. The others answer prompts the device prints,
-                  so they're opt-in per session. */}
-              <div className="p-2.5 bg-plinky-950/70 border border-plinky-800 rounded-md space-y-1.5 text-meta">
-                <div className="text-slate-300 font-medium">Automatic login from the vault</div>
-                {protocol === 'SSH' && (
-                  <p className="text-plinky-muted">
-                    SSH logs in by itself when the vault is unlocked and holds this session's password
-                    (linked above, or an entry named "session:{name.trim() || 'name'}" or after the host).
-                  </p>
-                )}
-                {(protocol === 'Telnet' || protocol === 'Serial') && (
-                  <label className="flex items-start space-x-2 cursor-pointer">
-                    <input type="checkbox" checked={autoLogin} onChange={e => setAutoLogin(e.target.checked)} className="mt-0.5" />
-                    <span className="text-slate-300">
-                      Log in automatically
-                      <span className="block text-plinky-muted">Types the vault username and password at the device's Username:/Password: prompts, once per connection.</span>
-                    </span>
-                  </label>
-                )}
-              </div>
-
+              <CredentialsTab {...{
+                protocol, name, username, setUsername, publicKeyFile, setPublicKeyFile, useVault, setUseVault,
+                vaultState, setUnlockFor, vaultMode, setVaultMode, vaultEntries, selectedVaultKey,
+                setSelectedVaultKey, vaultKeyId, setVaultKeyId, savedVaultKey, vaultPassword, setVaultPassword,
+                vaultEnablePassword, setVaultEnablePassword, removeEnable, setRemoveEnable, vaultEntryUsers,
+                enableJumpHost, autoEnable, setAutoEnable, autoLogin, setAutoLogin
+              }} />
             </div>
 
             <div data-tab="jump" hidden={tab !== 'jump'} className="space-y-3">
-              {/* MOBAXTERM-STYLE JUMP HOST / SSH GATEWAY (SSH Only) */}
-              {protocol === 'SSH' && (
-                <div className="p-3 bg-plinky-950/70 border border-plinky-800 rounded-md space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <label className="flex items-center space-x-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={enableJumpHost}
-                        onChange={e => setEnableJumpHost(e.target.checked)}
-                        className="rounded border-plinky-700 text-sky-500 focus:ring-0 bg-plinky-900"
-                      />
-                      <span className="text-slate-200 font-medium flex items-center space-x-1.5">
-                        <Shield className="w-3.5 h-3.5 text-sky-400" />
-                        <span>Connect through SSH Jump Host (Gateway / Bastion)</span>
-                      </span>
-                    </label>
-                    {hadJumpHost && enableJumpHost && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setEnableJumpHost(false);
-                          setJumpPreset(null);
-                          setJumpHost('');
-                          setJumpPort('22');
-                          setJumpUsername('');
-                          setJumpPassword('');
-                        }}
-                        className="flex items-center space-x-1 px-2 py-0.5 rounded border border-rose-500/40 text-rose-300 hover:bg-rose-500/10 text-meta shrink-0"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                        <span>Remove Jump Host</span>
-                      </button>
-                    )}
-                  </div>
-                  {hadJumpHost && !enableJumpHost && (
-                    <p role="status" className="text-amber-300/90 text-meta">
-                      The jump host will be removed when you save. This session will then connect directly.
-                    </p>
-                  )}
-
-                  {enableJumpHost && (
-                    <div className="space-y-2.5 pt-1 border-t border-plinky-800/80 animate-in fade-in duration-150">
-                      <fieldset className="space-y-1.5">
-                        <legend className="text-slate-300 text-meta mb-1">How the jump host reaches this device</legend>
-                        <div className="grid grid-cols-2 gap-2 text-xs">
-                          {([
-                            ['tunnel', 'SSH tunnel', 'A Linux bastion forwards the connection (PuTTY proxy).'],
-                            ['cli', 'Device command line', 'Router or switch: log in, then type the hop command at its prompt.'],
-                          ] as const).map(([id, title, note]) => (
-                            <label key={id} className={`flex flex-col gap-0.5 p-2 rounded border cursor-pointer ${
-                              jumpMode === id ? 'border-sky-500/60 bg-sky-500/10' : 'border-plinky-700 hover:border-plinky-600'
-                            }`}>
-                              <span className="flex items-center gap-1.5 font-medium text-slate-200">
-                                <input type="radio" name="jump-mode" value={id} checked={jumpMode === id}
-                                  onChange={() => setJumpMode(id)} className="text-sky-500 focus:ring-0 bg-plinky-900" />
-                                {title}
-                              </span>
-                              <span className="text-meta text-slate-400">{note}</span>
-                            </label>
-                          ))}
-                        </div>
-                      </fieldset>
-                      {jumpMode === 'cli' && (
-                        <div className="space-y-1">
-                          <label htmlFor="new-session-modal-hop-command" className="text-slate-300 text-meta">Hop command, typed at the jump device's prompt</label>
-                          <input id="new-session-modal-hop-command"
-                            type="text"
-                            autoComplete="off"
-                            value={jumpCommand}
-                            onChange={e => setJumpCommand(e.target.value)}
-                            className="w-full bg-plinky-900 border border-plinky-700 rounded px-2 py-1 text-slate-100 font-mono text-xs focus:outline-none focus:border-sky-500"
-                          />
-                          <div className="flex flex-wrap items-center gap-1.5 text-meta">
-                            {HOP_PRESETS.map(p => (
-                              <button key={p.label} type="button" onClick={() => setJumpCommand(p.command)}
-                                className={`px-1.5 py-0.5 rounded border ${jumpCommand === p.command ? 'border-sky-500/60 text-sky-300' : 'border-plinky-700 text-slate-400 hover:text-slate-200'}`}>
-                                {p.label}
-                              </button>
-                            ))}
-                          </div>
-                          <p className="text-meta text-plinky-muted leading-relaxed">
-                            <code className="text-slate-400">{'{user}'}</code>, <code className="text-slate-400">{'{host}'}</code> and{' '}
-                            <code className="text-slate-400">{'{port}'}</code> are this session's (General tab). With the vault unlocked,
-                            Thyrion types the jump device's password, this command, then this session's password; the second
-                            device's host key is checked by the jump device, not PuTTY.
-                          </p>
-                        </div>
-                      )}
-                      {/* Visual Topology Route Banner (MobaXterm Style) */}
-                      <div className="p-2 rounded bg-plinky-900/90 border border-sky-500/30 flex items-center justify-between text-meta">
-                        <div className="flex items-center space-x-1">
-                          <Laptop className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-                          <span className="text-slate-400">Client</span>
-                        </div>
-                        <div className="flex items-center space-x-1 text-plinky-muted">
-                          <div className="h-px w-4 bg-sky-500/50" />
-                          <span className="text-meta text-sky-400 uppercase font-semibold">SSH</span>
-                          <ArrowRight className="w-3 h-3 text-sky-400" />
-                        </div>
-                        <div className="flex items-center space-x-1 px-1.5 py-0.5 rounded bg-sky-950/80 border border-sky-500/50">
-                          <Shield className="w-3 h-3 text-slate-400 shrink-0" />
-                          <span className="text-slate-200 font-mono font-medium truncate max-w-[160px]" title={jumpHost || 'Jump Host'}>
-                            {jumpHost.trim() ? (jumpUsername ? `${jumpUsername}@${jumpHost}` : jumpHost) : 'Bastion'}
-                          </span>
-                        </div>
-                        <div className="flex items-center space-x-1 text-plinky-muted">
-                          <div className="h-px w-4 bg-sky-500/50" />
-                          <span className="text-meta text-sky-400 uppercase font-semibold">SSH</span>
-                          <ArrowRight className="w-3 h-3 text-slate-400" />
-                        </div>
-                        <div className="flex items-center space-x-1">
-                          <Server className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                          <span className="text-sky-200 font-mono font-medium truncate max-w-[150px]" title={hostname || 'Target'}>
-                            {hostname.trim() || 'Target'}
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* Preset from existing saved sessions */}
-                      {savedSessions.length > 0 && (
-                        <div className="space-y-1">
-                          <label htmlFor="new-session-modal-populate-from-saved-session" className="text-slate-400 text-meta">Populate from Saved Session</label>
-                          <select id="new-session-modal-populate-from-saved-session"
-                            onChange={e => {
-                              const sess = savedSessions.find(s => s.name === e.target.value);
-                              if (sess) {
-                                setJumpPreset(sess.name);
-                                setJumpHost(sess.hostname);
-                                setJumpPort(String(sess.port || 22));
-                                setJumpUsername(sess.username || '');
-                              }
-                            }}
-                            value={jumpPreset ?? ''}
-                            className="w-full bg-plinky-900 border border-plinky-700 rounded px-2 py-1 text-slate-200 text-xs focus:outline-none focus:border-sky-500"
-                          >
-                            <option value="" disabled>-- Select a saved bastion host --</option>
-                            {savedSessions.filter(s => s.protocol === 'SSH' && s.name !== name).map(s => (
-                              <option key={s.name} value={s.name}>
-                                {s.name} ({s.hostname}:{s.port})
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                      )}
-
-                      <div className="grid grid-cols-3 gap-2">
-                        <div className="col-span-2 space-y-1">
-                          <label htmlFor="new-session-modal-jump-host-gateway-ip" className="text-slate-300 text-meta">Jump Host / Gateway IP *</label>
-                          <input id="new-session-modal-jump-host-gateway-ip"
-                            type="text"
-                            required={enableJumpHost}
-                            placeholder="bastion.internal or jump.corp.com"
-                            value={jumpHost}
-                            onChange={e => { setJumpPreset(null); setJumpHost(e.target.value); }}
-                            className="w-full bg-plinky-900 border border-plinky-700 rounded px-2 py-1 text-slate-100 font-mono text-xs focus:outline-none focus:border-sky-500"
-                          />
-                        </div>
-                        <div className="space-y-1">
-                          <label htmlFor="new-session-modal-port-2" className="text-slate-300 text-meta">Port</label>
-                          <input id="new-session-modal-port-2"
-                            type="number"
-                            value={jumpPort}
-                            onChange={e => { setJumpPreset(null); setJumpPort(e.target.value); }}
-                            className="w-full bg-plinky-900 border border-plinky-700 rounded px-2 py-1 text-slate-100 font-mono text-xs focus:outline-none focus:border-sky-500"
-                          />
-                        </div>
-                      </div>
-
-                      <div className="space-y-1">
-                        <label htmlFor="new-session-modal-gateway-username" className="text-slate-300 text-meta">Gateway Username</label>
-                        <input id="new-session-modal-gateway-username"
-                          type="text"
-                          placeholder="bastion_user"
-                          value={jumpUsername}
-                          onChange={e => { setJumpPreset(null); setJumpUsername(e.target.value); }}
-                          className="w-full bg-plinky-900 border border-plinky-700 rounded px-2 py-1 text-slate-100 text-xs focus:outline-none focus:border-sky-500"
-                        />
-                      </div>
-
-                      {jumpPreset ? (
-                        <p className="text-plinky-muted text-meta">
-                          Logs in to the gateway with the vault password saved for "{jumpPreset}", if it has one.
-                        </p>
-                      ) : (
-                        <div className="space-y-1">
-                          <label className="text-slate-300 text-meta">Gateway Password (saved in the vault)</label>
-                          <input
-                            type="password"
-                            autoComplete="new-password"
-                            aria-label="Gateway Password"
-                            placeholder={jumpVaultKey ? '(stored in the vault; blank keeps it)' : 'optional: leave blank to type it at connect'}
-                            value={jumpPassword}
-                            onChange={e => setJumpPassword(e.target.value)}
-                            className="w-full bg-plinky-900 border border-plinky-700 rounded px-2 py-1 text-slate-100 text-xs focus:outline-none focus:border-sky-500"
-                          />
-                          <p className="text-plinky-muted text-meta">
-                            Sent only at {jumpUsername.trim() || '<user>'}@{jumpHost.trim() || '<gateway>'}'s password prompt, once.
-                            The target then logs in with this session's own vault password (Credentials &amp; Vault).
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-
+              <JumpHostTab {...{
+                protocol, name, hostname, savedSessions, hadJumpHost, enableJumpHost, setEnableJumpHost,
+                jumpMode, setJumpMode, jumpCommand, setJumpCommand, jumpPreset, setJumpPreset, jumpHost,
+                setJumpHost, jumpPort, setJumpPort, jumpUsername, setJumpUsername, jumpPassword,
+                setJumpPassword, jumpVaultKey
+              }} />
             </div>
 
             <div data-tab="serial" hidden={tab !== 'serial'} className="space-y-3">
-              <div className="p-3 bg-plinky-950/70 border border-plinky-800 rounded-md space-y-2">
-                <div className="flex items-center space-x-2 text-slate-300 font-medium pb-1 border-b border-plinky-800">
-                  <Cpu className="w-3.5 h-3.5 text-slate-400" />
-                  <span>Line settings</span>
-                </div>
-                <div className="grid grid-cols-4 gap-2">
-                  <div className="space-y-1">
-                    <label htmlFor="new-session-modal-data-bits" className="text-slate-400 text-meta">Data Bits</label>
-                    <select id="new-session-modal-data-bits"
-                      value={serialDataBits}
-                      onChange={e => setSerialDataBits(e.target.value)}
-                      className="w-full bg-plinky-900 border border-plinky-700 rounded px-1.5 py-0.5 text-slate-200 text-xs"
-                    >
-                      <option value="8">8</option>
-                      <option value="7">7</option>
-                      <option value="6">6</option>
-                      <option value="5">5</option>
-                    </select>
-                  </div>
-
-                  <div className="space-y-1">
-                    <label htmlFor="new-session-modal-stop-bits" className="text-slate-400 text-meta">Stop Bits</label>
-                    <select id="new-session-modal-stop-bits"
-                      value={serialStopBits}
-                      onChange={e => setSerialStopBits(e.target.value)}
-                      className="w-full bg-plinky-900 border border-plinky-700 rounded px-1.5 py-0.5 text-slate-200 text-xs"
-                    >
-                      <option value="2">1</option>
-                      <option value="4">2</option>
-                    </select>
-                  </div>
-
-                  <div className="space-y-1">
-                    <label htmlFor="new-session-modal-parity" className="text-slate-400 text-meta">Parity</label>
-                    <select id="new-session-modal-parity"
-                      value={serialParity}
-                      onChange={e => setSerialParity(e.target.value)}
-                      className="w-full bg-plinky-900 border border-plinky-700 rounded px-1.5 py-0.5 text-slate-200 text-xs"
-                    >
-                      <option value="0">None</option>
-                      <option value="1">Odd</option>
-                      <option value="2">Even</option>
-                    </select>
-                  </div>
-
-                  <div className="space-y-1">
-                    <label htmlFor="new-session-modal-flow-control" className="text-slate-400 text-meta">Flow Control</label>
-                    <select id="new-session-modal-flow-control"
-                      value={serialFlowControl}
-                      onChange={e => setSerialFlowControl(e.target.value)}
-                      className="w-full bg-plinky-900 border border-plinky-700 rounded px-1.5 py-0.5 text-slate-200 text-xs"
-                    >
-                      <option value="0">None</option>
-                      <option value="1">XON/XOFF</option>
-                      <option value="2">RTS/CTS</option>
-                    </select>
-                  </div>
-                </div>
-                  </div>
+              <SerialTab {...{
+                serialDataBits, setSerialDataBits, serialStopBits, setSerialStopBits, serialParity,
+                setSerialParity, serialFlowControl, setSerialFlowControl
+              }} />
             </div>
 
-            {/* Appearance: this session's own scheme and font, over Settings
-                (the gear), which stays the default for every session. */}
             <div data-tab="appearance" hidden={tab !== 'appearance'} className="space-y-3">
-              <p className="text-meta text-plinky-muted">
-                For this session only. "Use default" follows Settings (the gear), the default for every session.
-              </p>
-              <div className="space-y-1">
-                <label htmlFor="session-look-scheme" className="text-slate-300 font-medium">Colour scheme</label>
-                <select
-                  id="session-look-scheme"
-                  value={lookScheme}
-                  onChange={e => setLookScheme(e.target.value)}
-                  className="w-full bg-plinky-950 border border-plinky-700 rounded px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-sky-500"
-                >
-                  <option value="">Use default (from Settings)</option>
-                  <option value={MATCH_INTERFACE}>Match interface theme</option>
-                  {TERMINAL_THEMES.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-                </select>
-              </div>
-              <div className="space-y-1">
-                <label htmlFor="session-look-font" className="text-slate-300 font-medium">Font</label>
-                <select
-                  id="session-look-font"
-                  value={lookFont}
-                  onChange={e => setLookFont(e.target.value)}
-                  className="w-full bg-plinky-950 border border-plinky-700 rounded px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-sky-500"
-                >
-                  <option value="">Use default (from Settings)</option>
-                  {lookFont && !TERMINAL_FONTS.some(f => f.value === lookFont) && <option value={lookFont}>Custom (saved)</option>}
-                  {TERMINAL_FONTS.map(f => <option key={f.value} value={f.value}>{f.label}{f.note ? ` (${f.note})` : ''}</option>)}
-                </select>
-              </div>
-              <div className="space-y-1">
-                <label htmlFor="session-look-size" className="text-slate-300 font-medium">Font size</label>
-                <select
-                  id="session-look-size"
-                  value={lookSize}
-                  onChange={e => setLookSize(e.target.value)}
-                  className="w-full bg-plinky-950 border border-plinky-700 rounded px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-sky-500"
-                >
-                  <option value="">Use default (from Settings)</option>
-                  {Array.from({ length: 25 }, (_, i) => i + 8).map(n => <option key={n} value={String(n)}>{n} px</option>)}
-                </select>
-              </div>
-              <TerminalSchemePreview
-                scheme={lookScheme ? findTerminalTheme(lookScheme) : defaultScheme}
-                fontFamily={lookFont || storedFont}
-                fontSize={Number(lookSize) || storedSize}
-                testId="session-look-preview"
-              />
+              <AppearanceTab {...{
+                lookScheme, setLookScheme, lookFont, setLookFont, lookSize, setLookSize
+              }} />
             </div>
 
             <div data-tab="advanced" hidden={tab !== 'advanced'} className="space-y-3">
-              {/* Connection (T-016): keepalives + auto-reconnect */}
-              {!isSerial && (
-                <div className="p-2.5 bg-plinky-950/70 border border-plinky-800 rounded-md space-y-1.5 text-meta">
-                  <div className="text-slate-300 font-medium">Connection</div>
-                  <label className="flex items-center justify-between space-x-2">
-                    <span className="text-slate-300">Send keepalives every</span>
-                    <span className="flex items-center space-x-1.5">
-                      <input
-                        type="number"
-                        min={0}
-                        step={5}
-                        value={keepalive}
-                        onChange={e => setKeepalive(e.target.value)}
-                        placeholder="0"
-                        aria-label="Keepalive interval in seconds"
-                        className="w-20 bg-plinky-900 border border-plinky-700 rounded px-2 py-0.5 text-slate-100 text-xs text-right focus:outline-none focus:border-sky-500"
-                      />
-                      <span className="text-plinky-muted">s (0 = off)</span>
-                    </span>
-                  </label>
-                  <label className="flex items-center space-x-2 cursor-pointer">
-                    <input type="checkbox" checked={tcpKeepalives} onChange={e => setTcpKeepalives(e.target.checked)} />
-                    <span className="text-slate-300">TCP keepalives</span>
-                  </label>
-                  <label className="flex items-start space-x-2 cursor-pointer">
-                    <input type="checkbox" checked={autoReconnect} onChange={e => setAutoReconnect(e.target.checked)} className="mt-0.5" />
-                    <span className="text-slate-300">
-                      Reconnect automatically if the connection drops
-                      <span className="block text-plinky-muted">Not after you type exit or a login fails. Tries 5 times, waiting longer each time.</span>
-                    </span>
-                  </label>
-                </div>
-              )}
-
-              {/* Automatic log (session/autolog.rs) */}
-              <div className="p-2.5 bg-plinky-950/70 border border-plinky-800 rounded-md space-y-1 text-meta">
-                <label className="flex items-center justify-between space-x-2">
-                  <span className="text-slate-300 font-medium">Log this session</span>
-                  <select
-                    value={autoLog}
-                    onChange={e => setAutoLog(e.target.value as typeof autoLog)}
-                    aria-label="Log this session"
-                    className="bg-plinky-900 border border-plinky-700 rounded px-2 py-0.5 text-slate-100 text-xs focus:outline-none focus:border-sky-500"
-                  >
-                    <option value="global">As in Settings</option>
-                    <option value="always">Always</option>
-                    <option value="never">Never</option>
-                  </select>
-                </label>
-                <p className="text-plinky-muted">
-                  Each connection is saved to its own file, in Settings' log folder under this session's folder and
-                  name: {(folder.trim() || 'Saved Sessions')}/{(name.trim() || hostname.trim() || 'session')}/date_time.log.
-                </p>
-              </div>
-
-              {/* Paste line delay (T-015) */}
-              <div className="p-2.5 bg-plinky-950/70 border border-plinky-800 rounded-md space-y-1 text-meta">
-                <label className="flex items-center justify-between space-x-2">
-                  <span className="text-slate-300 font-medium">Paste line delay</span>
-                  <span className="flex items-center space-x-1.5">
-                    <input
-                      type="number"
-                      min={0}
-                      max={MAX_PASTE_LINE_DELAY_MS}
-                      step={50}
-                      value={pasteDelay}
-                      onChange={e => setPasteDelay(e.target.value)}
-                      placeholder="0"
-                      aria-label="Paste line delay in milliseconds"
-                      className="w-20 bg-plinky-900 border border-plinky-700 rounded px-2 py-0.5 text-slate-100 text-xs text-right focus:outline-none focus:border-sky-500"
-                    />
-                    <span className="text-plinky-muted">ms</span>
-                  </span>
-                </label>
-                <p className="text-plinky-muted">
-                  Sends a multi-line paste one line at a time, this far apart, for console ports and network gear that
-                  drop characters. 0 pastes normally. Up to {MAX_PASTE_LINE_DELAY_MS} ms.
-                </p>
-              </div>
-
-              {/* Logon actions (expect.rs logon_actions) */}
-              <div className="p-2.5 bg-plinky-950/70 border border-plinky-800 rounded-md space-y-1.5 text-meta">
-                <div className="text-slate-300 font-medium">Logon actions</div>
-                <p className="text-plinky-muted">
-                  Typed once the login is over, in order: wait until the output ends with the text on the left, then send
-                  the line on the right. Leave "wait for" empty to wait for any prompt (# &gt; $ %).
-                  Not for passwords: they are saved in the session file as plain text. Use the vault.
-                </p>
-                {logonActions.map((a, i) => (
-                  <div key={i} className="flex items-center space-x-1.5">
-                    <input
-                      value={a.wait}
-                      onChange={e => setLogonActions(list => list.map((x, j) => (j === i ? { ...x, wait: e.target.value } : x)))}
-                      placeholder="#"
-                      aria-label={`Logon action ${i + 1}: wait for`}
-                      className="w-24 bg-plinky-900 border border-plinky-700 rounded px-2 py-0.5 text-slate-100 text-xs font-mono focus:outline-none focus:border-sky-500"
-                    />
-                    <span className="text-plinky-muted">then send</span>
-                    <input
-                      value={a.send}
-                      onChange={e => setLogonActions(list => list.map((x, j) => (j === i ? { ...x, send: e.target.value } : x)))}
-                      placeholder="terminal length 0"
-                      aria-label={`Logon action ${i + 1}: send`}
-                      className="flex-1 min-w-0 bg-plinky-900 border border-plinky-700 rounded px-2 py-0.5 text-slate-100 text-xs font-mono focus:outline-none focus:border-sky-500"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setLogonActions(list => list.filter((_, j) => j !== i))}
-                      aria-label={`Remove logon action ${i + 1}`}
-                      className="p-1 text-plinky-muted hover:text-rose-400"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  </div>
-                ))}
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setLogonActions(list => [...list, { wait: '#', send: '' }])}
-                    className="px-2 py-0.5 rounded bg-plinky-800 hover:bg-plinky-700 text-slate-300"
-                  >
-                    Add a logon action
-                  </button>
-                  {/* The commands a platform needs so output isn't paged (logonPresets.ts). */}
-                  <select
-                    value=""
-                    onChange={e => { const id = e.target.value; if (id) setLogonActions(list => withPreset(list, id)); }}
-                    aria-label="Add the commands for a platform"
-                    className="bg-plinky-900 border border-plinky-700 rounded px-1.5 py-0.5 text-slate-300 text-xs focus:outline-none focus:border-sky-500"
-                  >
-                    <option value="">Add for a platform…</option>
-                    {LOGON_PRESETS.map(p => (
-                      <option key={p.id} value={p.id}>{p.label}: {p.commands.join(', ')}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
+              <AdvancedTab {...{
+                protocol, name, hostname, folder, keepalive, setKeepalive, tcpKeepalives, setTcpKeepalives,
+                autoReconnect, setAutoReconnect, autoLog, setAutoLog, pasteDelay, setPasteDelay, logonActions,
+                setLogonActions
+              }} />
             </div>
 
             {vaultSaveError && (
