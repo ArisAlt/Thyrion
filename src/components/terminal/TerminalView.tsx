@@ -55,16 +55,17 @@ import { TerminalContextMenu, HookShell } from './TerminalContextMenu';
 import { EventLogDialog, SessionLogDialog, PuTTYEventLog } from './TerminalLogDialogs';
 import { TerminalSearchBar } from './TerminalSearchBar';
 import { TerminalHeader } from './TerminalHeader';
+import { registerLinks } from './terminalLinks';
+import { registerShellIntegration, jumpToPrompt } from './shellIntegration';
+import { readOutputStatus } from '../../services/outputStatus';
 import { useTerminalVault } from './useTerminalVault';
-import { useTerminalPaste } from './useTerminalPaste';
+import { useTerminalPaste, listenForPastes } from './useTerminalPaste';
 import { useAutoReconnect } from './useAutoReconnect';
 import {
   DropOverlay, ConnectingOverlay, HostKeyChangedBar, ConnectionBar, LockedBar, ScriptBar,
   PasteProgressBar, PasswordPromptBar, VaultLockedPromptBar, EnableNoticeBar,
 } from './TerminalStatusBars';
 import { fatalHint, sshBannerHint } from '../../services/fatalHint';
-import { needsPasteConfirm } from '../../services/pasteConfirm';
-import { getMiddleClickPaste } from '../../services/middleClickPaste';
 import { terminalShortcut, keySequenceFor } from '../../services/shortcuts';
 import { writeClipboard, copiedText } from '../../services/clipboard';
 import { DEFAULT_TERMINAL_FONT, loadTerminalFont } from '../../themes/fonts';
@@ -430,46 +431,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     term.loadAddon(searchAddon);
     searchAddonRef.current = searchAddon;
 
-    // Register OSC 133 Shell Integration Handler (Semantic Prompt Gating & Prompt Jumping)
-    const osc133Disposable = term.parser.registerOscHandler(133, (data) => {
-      isOsc133IntegratedRef.current = true;
-      const code = data.charAt(0).toUpperCase();
-      if (code === 'B') {
-        isPromptInputRegionRef.current = true;
-      } else if (code === 'C' || code === 'D') {
-        isPromptInputRegionRef.current = false;
-      } else if (code === 'A') {
-        const line = term.buffer.active.cursorY + term.buffer.active.baseY;
-        if (!promptLinesRef.current.includes(line)) {
-          promptLinesRef.current.push(line);
-          if (promptLinesRef.current.length > 500) promptLinesRef.current.shift();
-        }
-      }
-      return false;
-    });
-
-    // Register OSC 7 Handler (Current Working Directory Reporting for SFTP Directory Following)
-    const osc7Disposable = term.parser.registerOscHandler(7, (data) => {
-      try {
-        const filePrefix = 'file://';
-        let path = '';
-        if (data.startsWith(filePrefix)) {
-          const rest = data.slice(filePrefix.length);
-          const slashIdx = rest.indexOf('/');
-          if (slashIdx !== -1) {
-            path = rest.slice(slashIdx);
-          }
-        } else if (data.startsWith('/')) {
-          path = data;
-        }
-        if (path) {
-          onCwdChange?.(path);
-        }
-      } catch (e) {
-        console.warn('Failed to parse OSC 7 directory:', e);
-      }
-      return false;
-    });
+    // Prompts and the current directory, from a shell with Thyrion's hooks.
+    const shellIntegration = registerShellIntegration(term, {
+      integrated: isOsc133IntegratedRef, inPromptInput: isPromptInputRegionRef, promptLines: promptLinesRef,
+    }, onCwdChange);
 
     searchAddon.onDidChangeResults((e) => {
       if (e) {
@@ -522,59 +487,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     terminalManager.registerTerminal(tab.id, term, tab.syncChannel);
     terminalManager.setActiveTab(tab.id);
 
-    // Register Real-time Regex Link Provider (IPs, URLs)
-    term.registerLinkProvider({
-      provideLinks: (bufferLineNumber, callback) => {
-        const line = term.buffer.active.getLine(bufferLineNumber - 1);
-        if (!line) {
-          callback(undefined);
-          return;
-        }
-        const text = line.translateToString(true);
-        const links: Array<{
-          range: { start: { x: number; y: number }; end: { x: number; y: number } };
-          text: string;
-          activate: (event: MouseEvent, text: string) => void;
-        }> = [];
-
-        // IPv4 Pattern Matcher
-        const ipRegex = /\b(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b/g;
-        let match;
-        while ((match = ipRegex.exec(text)) !== null) {
-          const start = match.index + 1;
-          const matchedText = match[0];
-          links.push({
-            range: {
-              start: { x: start, y: bufferLineNumber },
-              end: { x: start + matchedText.length, y: bufferLineNumber },
-            },
-            text: matchedText,
-            activate: (_e, ip) => {
-              void writeClipboard(ip);
-            },
-          });
-        }
-
-        // URL Pattern Matcher
-        const urlRegex = /https?:\/\/[^\s/$.?#].[^\s]*/g;
-        while ((match = urlRegex.exec(text)) !== null) {
-          const start = match.index + 1;
-          const matchedText = match[0];
-          links.push({
-            range: {
-              start: { x: start, y: bufferLineNumber },
-              end: { x: start + matchedText.length, y: bufferLineNumber },
-            },
-            text: matchedText,
-            activate: (_e, url) => {
-              window.open(url, '_blank');
-            },
-          });
-        }
-
-        callback(links);
-      },
-    });
+    // IP addresses copy, URLs open (terminalLinks.ts).
+    registerLinks(term);
 
     // Set once this view unmounts. Unmounting (switching tabs, a split pane
     // re-render) must NOT kill the backend session -- it's detached, not
@@ -622,32 +536,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       });
       const text = new TextDecoder().decode(chunk);
 
-      // Status transitions
-      const isPreauthPattern = (
-        text.includes('password:') || 
-        text.includes('Password:') || 
-        text.includes('login as:') || 
-        text.includes('Using username') ||
-        text.includes('passphrase') ||
-        text.includes('Passphrase') ||
-        text.includes('(yes/no') ||
-        text.includes('Store key in cache?')
-      );
-      // A telnet/raw console (GNS3) has no login messages and often no prompt
-      // until Enter: any output at all means it is connected (T-020).
-      const isConsoleTarget = tab.protocol === 'Telnet' || tab.protocol === 'RAW';
-      const isLivePattern = (
-        text.includes('Access granted') || 
-        text.includes('Last login:') || 
-        /(?:[\$#%❯]\s*)$/m.test(text.trim())
-      );
-
       // Password & enable prompt detection, on the tail of the output so a
       // prompt split across chunks, or IOS's "enable" then "Password:", is seen.
       recentOutputRef.current = appendRecentOutput(recentOutputRef.current, text);
       const promptKind = classifyPasswordPrompt(recentOutputRef.current);
-      const isEnablePrompt = promptKind === 'enable';
-      const isPasswordPrompt = promptKind !== null;
       const answeredAutomatically = autoRespondRef.current(promptKind, recentOutputRef.current);
 
       const hint = live ? fatalHint(text, tab.hostname, tab.port) : null;
@@ -657,7 +549,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         sshBannerToldRef.current = true;
         term.writeln(`\r\n\x1b[33m[Thyrion: ${mismatch}]\x1b[0m`);
       }
-      if (text.includes('[Thyrion: Session closed') || text.includes('FATAL ERROR:')) {
+
+      // Status transitions (outputStatus.ts).
+      const status = readOutputStatus(text, {
+        ended: endedRef.current,
+        reachedLive: reachedLiveRef.current,
+        consoleTarget: tab.protocol === 'Telnet' || tab.protocol === 'RAW',
+      });
+      if (status === 'ended') {
         endedRef.current = true;
         onUpdateTab(tab.id, { status: 'disconnected' });
         setDetectedPasswordPrompt(null);
@@ -671,31 +570,22 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           scheduleAutoReconnectRef.current();
         }
         reachedLiveRef.current = false;
-      } else if (endedRef.current) {
+      } else if (status === 'stillEnded') {
         // A process that has ended: nothing it printed last changes it.
-      } else if (isPreauthPattern && !reachedLiveRef.current) {
-        // Only before the login is over. After it, text that looks like a
-        // login is the session's own output: Windows' pseudo-console
-        // repaints plink's whole screen (the old "password:" included)
-        // when the tab tells it its size on reattach, and a router's
-        // `enable` asks "Password:". Either turned a live tab amber. The
-        // prompt is still noticed below, for the vault's offer.
+      } else if (status === 'preauth') {
+        // The prompt is noticed as well, for the vault's offer.
         onUpdateTab(tab.id, { status: 'preauth' });
-        if (isEnablePrompt) {
-          setDetectedPasswordPrompt('enable');
-        } else if (isPasswordPrompt) {
-          setDetectedPasswordPrompt('login');
-        }
-      } else if (isLivePattern || (isConsoleTarget && !reachedLiveRef.current && text.length > 0)) {
+        if (promptKind) setDetectedPasswordPrompt(promptKind);
+      } else if (status === 'live') {
         if (!reachedLiveRef.current && live) addEventLog(isLocalSession ? 'Shell ready' : 'Connected', 'success');
         onUpdateTab(tab.id, { status: 'live' });
         setDetectedPasswordPrompt(null);
         reachedLiveRef.current = true;
         reconnectAttemptRef.current = 0; // back up: the next drop starts over
-      } else if (isEnablePrompt) {
-        setDetectedPasswordPrompt('enable');
-      } else if (isPasswordPrompt) {
-        setDetectedPasswordPrompt('login');
+      } else if (promptKind) {
+        // A prompt the status stays the same for (a router's enable, one
+        // split across chunks): the vault offers its password.
+        setDetectedPasswordPrompt(promptKind);
       }
       if (answeredAutomatically) setDetectedPasswordPrompt(null);
     };
@@ -897,68 +787,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         }
       });
 
-    // A paste the webview performs itself (its own paste key, a middle
-    // click) reaches xterm as a DOM paste event on its textarea. When the
-    // paste window should ask first, or this session paces multi-line
-    // pastes, take it here (capture phase, before xterm); otherwise xterm
-    // pastes as usual (bracketed paste and all).
-    const pasteTarget = containerRef.current;
-    // Until when a paste event is the webview's own middle-click paste of
-    // one we already sent (middleClickPaste.ts): dropped, not sent twice.
-    let swallowPasteUntil = 0;
-    const onPasteCapture = (e: ClipboardEvent) => {
-      if (Date.now() < swallowPasteUntil) {
-        e.preventDefault();
-        e.stopPropagation();
-        return;
-      }
-      const text = e.clipboardData?.getData('text/plain') ?? '';
-      const paced = pasteActionsRef.current.pacedPaste(text);
-      if (paced || needsPasteConfirm(text)) {
-        e.preventDefault();
-        e.stopPropagation();
-        const a = pasteActionsRef.current;
-        void a.confirmThenPaste(text, t => pasteActionsRef.current.deliverTypedPaste(t));
-      }
-    };
-    pasteTarget?.addEventListener('paste', onPasteCapture, true);
-
-    // Middle click pastes the clipboard, as PuTTY's does, through the same
-    // path as the paste keys. Taken before xterm and the webview: stopping
-    // the press keeps WebView2 from starting autoscroll and WebKitGTK from
-    // pasting the X selection as well. A program that asked for the mouse
-    // (vim with mouse=a) gets the click instead, unless Shift is held, as
-    // in PuTTY.
-    let middlePressed = false;
-    const takesMiddleClick = (e: MouseEvent) =>
-      e.button === 1 && getMiddleClickPaste() && !!(e.target as Element | null)?.closest?.('.xterm') &&
-      (e.shiftKey || term.modes.mouseTrackingMode === 'none');
-    const onMiddleDown = (e: MouseEvent) => {
-      middlePressed = takesMiddleClick(e);
-      if (!middlePressed) return;
-      e.preventDefault();
-      e.stopPropagation();
-      swallowPasteUntil = Date.now() + 1000;
-    };
-    const onMiddleUp = (e: MouseEvent) => {
-      if (e.button !== 1 || !middlePressed) return;
-      middlePressed = false;
-      e.preventDefault();
-      e.stopPropagation();
-      swallowPasteUntil = Date.now() + 500;
-      term.focus();
-      void pasteActionsRef.current.pasteFromClipboard(t => pasteActionsRef.current.deliverTypedPaste(t));
-    };
-    // The click and auxclick after it: nothing else should act on them.
-    const onMiddleClick = (e: MouseEvent) => {
-      if (e.button === 1 && Date.now() < swallowPasteUntil) {
-        e.preventDefault();
-        e.stopPropagation();
-      }
-    };
-    pasteTarget?.addEventListener('mousedown', onMiddleDown, true);
-    pasteTarget?.addEventListener('mouseup', onMiddleUp, true);
-    pasteTarget?.addEventListener('auxclick', onMiddleClick, true);
+    // Pastes the webview makes itself, and the middle click (useTerminalPaste.ts).
+    const stopPasteListeners = listenForPastes(containerRef.current, term, pasteActionsRef);
 
     // Copy, paste and select all (shortcuts.ts). Handled here, not left to
     // the webview: WebKitGTK and WebView2 disagree on which of these keys
@@ -1038,28 +868,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         setIsSearchOpen(false);
         searchAddonRef.current?.clearDecorations();
         term.focus();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'ArrowUp') {
-        // OSC 133 semantic prompt jump previous
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        // OSC 133 semantic prompt jump
         e.preventDefault();
-        const currentScrollY = term.buffer.active.viewportY;
-        const sorted = [...promptLinesRef.current].sort((a, b) => a - b);
-        const prev = sorted.reverse().find(l => l < currentScrollY);
-        if (prev !== undefined) {
-          term.scrollToLine(prev);
-        } else if (sorted.length > 0) {
-          term.scrollToLine(sorted[0]);
-        }
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'ArrowDown') {
-        // OSC 133 semantic prompt jump next
-        e.preventDefault();
-        const currentScrollY = term.buffer.active.viewportY;
-        const sorted = [...promptLinesRef.current].sort((a, b) => a - b);
-        const next = sorted.find(l => l > currentScrollY);
-        if (next !== undefined) {
-          term.scrollToLine(next);
-        } else {
-          term.scrollToBottom();
-        }
+        jumpToPrompt(term, promptLinesRef.current, e.key === 'ArrowUp' ? 'prev' : 'next');
       }
     };
 
@@ -1090,10 +902,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return () => {
       restartSessionRef.current = null;
       unlistenConnected?.();
-      pasteTarget?.removeEventListener('paste', onPasteCapture, true);
-      pasteTarget?.removeEventListener('mousedown', onMiddleDown, true);
-      pasteTarget?.removeEventListener('mouseup', onMiddleUp, true);
-      pasteTarget?.removeEventListener('auxclick', onMiddleClick, true);
+      stopPasteListeners();
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('resize', handleResize);
       if (resizeObserver) {
@@ -1113,8 +922,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       // scrollback rather than wait for acknowledgements (ADR-006).
       acker.dispose();
       if (!isSessionClosed(tab.id)) void detachTerminalSession(tab.id);
-      osc133Disposable.dispose();
-      osc7Disposable.dispose();
+      shellIntegration.dispose();
       disposed = true;
       highlighter.dispose();
       highlighterRef.current = null;

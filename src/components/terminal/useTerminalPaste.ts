@@ -6,7 +6,16 @@ import { classifyPasswordPrompt } from '../../services/promptDetect';
 import { isMultiLinePaste } from '../../services/appEvents';
 import { askPaste, needsPasteConfirm } from '../../services/pasteConfirm';
 import { readClipboard } from '../../services/clipboard';
+import { getMiddleClickPaste } from '../../services/middleClickPaste';
 import { AddEventLog } from './TerminalLogDialogs';
+
+/** The ways to paste, for listeners set up once per terminal. */
+export interface PasteActions {
+  confirmThenPaste: (text: string, deliver: (t: string) => Promise<void>) => Promise<void>;
+  pasteFromClipboard: (deliver: (t: string) => Promise<void>) => Promise<void>;
+  deliverTypedPaste: (text: string) => Promise<void>;
+  pacedPaste: (text: string) => boolean;
+}
 
 // How a terminal pastes: through the paste window when Settings asks for
 // it, then flat out, through xterm, or one line at a time.
@@ -111,8 +120,84 @@ export function useTerminalPaste({ tab, isSerial, isLivePtyRef, terminalRef, add
     await confirmThenPaste(text, deliver);
   };
   // The listeners set up once per terminal reach the current versions here.
-  const pasteActionsRef = useRef({ confirmThenPaste, pasteFromClipboard, deliverTypedPaste, pacedPaste });
+  const pasteActionsRef = useRef<PasteActions>({ confirmThenPaste, pasteFromClipboard, deliverTypedPaste, pacedPaste });
   pasteActionsRef.current = { confirmThenPaste, pasteFromClipboard, deliverTypedPaste, pacedPaste };
 
   return { pasteDelayRef, pasteJob, deliverTypedPaste, pasteFromClipboard, pasteActionsRef };
+}
+
+/**
+ * Pastes the webview makes itself, and the middle click. Returns a function
+ * that stops listening.
+ */
+export function listenForPastes(target: HTMLElement, term: Terminal, actions: React.RefObject<PasteActions>): () => void {
+  // A paste the webview performs itself (its own paste key, a middle
+  // click) reaches xterm as a DOM paste event on its textarea. When the
+  // paste window should ask first, or this session paces multi-line
+  // pastes, take it here (capture phase, before xterm); otherwise xterm
+  // pastes as usual (bracketed paste and all).
+
+  // Until when a paste event is the webview's own middle-click paste of
+  // one we already sent (middleClickPaste.ts): dropped, not sent twice.
+  let swallowPasteUntil = 0;
+  const onPasteCapture = (e: ClipboardEvent) => {
+    if (Date.now() < swallowPasteUntil) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    const text = e.clipboardData?.getData('text/plain') ?? '';
+    const paced = actions.current.pacedPaste(text);
+    if (paced || needsPasteConfirm(text)) {
+      e.preventDefault();
+      e.stopPropagation();
+      const a = actions.current;
+      void a.confirmThenPaste(text, t => actions.current.deliverTypedPaste(t));
+    }
+  };
+  target.addEventListener('paste', onPasteCapture, true);
+
+  // Middle click pastes the clipboard, as PuTTY's does, through the same
+  // path as the paste keys. Taken before xterm and the webview: stopping
+  // the press keeps WebView2 from starting autoscroll and WebKitGTK from
+  // pasting the X selection as well. A program that asked for the mouse
+  // (vim with mouse=a) gets the click instead, unless Shift is held, as
+  // in PuTTY.
+  let middlePressed = false;
+  const takesMiddleClick = (e: MouseEvent) =>
+    e.button === 1 && getMiddleClickPaste() && !!(e.target as Element | null)?.closest?.('.xterm') &&
+    (e.shiftKey || term.modes.mouseTrackingMode === 'none');
+  const onMiddleDown = (e: MouseEvent) => {
+    middlePressed = takesMiddleClick(e);
+    if (!middlePressed) return;
+    e.preventDefault();
+    e.stopPropagation();
+    swallowPasteUntil = Date.now() + 1000;
+  };
+  const onMiddleUp = (e: MouseEvent) => {
+    if (e.button !== 1 || !middlePressed) return;
+    middlePressed = false;
+    e.preventDefault();
+    e.stopPropagation();
+    swallowPasteUntil = Date.now() + 500;
+    term.focus();
+    void actions.current.pasteFromClipboard(t => actions.current.deliverTypedPaste(t));
+  };
+  // The click and auxclick after it: nothing else should act on them.
+  const onMiddleClick = (e: MouseEvent) => {
+    if (e.button === 1 && Date.now() < swallowPasteUntil) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  };
+  target.addEventListener('mousedown', onMiddleDown, true);
+  target.addEventListener('mouseup', onMiddleUp, true);
+  target.addEventListener('auxclick', onMiddleClick, true);
+
+  return () => {
+    target.removeEventListener('paste', onPasteCapture, true);
+    target.removeEventListener('mousedown', onMiddleDown, true);
+    target.removeEventListener('mouseup', onMiddleUp, true);
+    target.removeEventListener('auxclick', onMiddleClick, true);
+  };
 }
