@@ -61,6 +61,7 @@ import { newId } from '../../services/ids';
 import { STATUS_DOT, STATUS_TEXT } from '../../services/sessionStatus';
 import { VaultUnlockDialog } from '../vault/VaultUnlockDialog';
 import { HostKeyDialog, storedFingerprint } from './HostKeyDialog';
+import { TerminalContextMenu, HookShell } from './TerminalContextMenu';
 import { fatalHint, sshBannerHint } from '../../services/fatalHint';
 import { askPaste, needsPasteConfirm } from '../../services/pasteConfirm';
 import { getMiddleClickPaste } from '../../services/middleClickPaste';
@@ -79,23 +80,16 @@ import {
   X, 
   Copy, 
   Clipboard, 
-  Trash2, 
-  CheckSquare,
-  Columns,
-  Rows,
   Zap,
   FileText,
   List,
   RotateCcw,
   CopyCheck,
-  Settings as SettingsIcon,
   Upload,
   Key,
   Shield,
   Check
 } from 'lucide-react';
-
-type HookShell = 'bash' | 'zsh' | 'fish';
 
 interface PuTTYEventLog {
   id: string;
@@ -2364,260 +2358,42 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           />
         )}
 
-        {/* Custom Terminal Context Menu */}
         {contextMenu && (
-          <div
-            ref={contextMenuRef}
-            className="fixed z-40 w-[17rem] max-h-[calc(100vh-16px)] overflow-y-auto bg-plinky-900 border border-plinky-700/80 rounded-lg shadow-2xl py-1 text-slate-200 text-xs select-none backdrop-blur-md animate-in fade-in zoom-in-95 duration-100"
-            style={{ left: contextMenu.x, top: contextMenu.y }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button
-              onClick={handleCopy}
-              className="w-full flex items-center space-x-2 px-3 py-1.5 hover:bg-sky-600/30 hover:text-sky-200 text-left transition"
-            >
-              <Copy className="w-3.5 h-3.5 text-sky-400" />
-              <span className="flex-1">Copy Selection</span>
-              <span className="text-meta text-plinky-muted">Ctrl+Shift+C</span>
-            </button>
-            <button
-              onClick={handlePaste}
-              className="w-full flex items-center space-x-2 px-3 py-1.5 hover:bg-sky-600/30 hover:text-sky-200 text-left transition"
-            >
-              <Clipboard className="w-3.5 h-3.5 text-slate-400" />
-              <span className="flex-1">Paste</span>
-              <span className="text-meta text-plinky-muted">Ctrl+Shift+V</span>
-            </button>
-            <button
-              onClick={handleSelectAll}
-              className="w-full flex items-center space-x-2 px-3 py-1.5 hover:bg-sky-600/30 hover:text-sky-200 text-left transition"
-            >
-              <CheckSquare className="w-3.5 h-3.5 text-slate-400" />
-              <span className="flex-1">Select All</span>
-              <span className="text-meta text-plinky-muted">Ctrl+Shift+A</span>
-            </button>
-            {/* The vault's passwords. "Send Enable Password" is listed for
-                every session, saved one or not, so it can be found; with
-                none saved it says where one goes (requestEnablePassword). */}
-            {!isLocalSession && (
-              <>
-                <div className="border-t border-plinky-800 my-1" />
-                <div className="px-3 py-1 text-meta font-semibold uppercase tracking-wider text-plinky-muted flex items-center space-x-1">
-                  <Shield className="w-3 h-3 text-slate-400" />
-                  <span>{vaultKey ? `Vault (${vaultKey})` : 'Vault'}</span>
-                </div>
-                {vaultKey && vault?.hasLoginSecret !== false && (
-                  <button
-                    onClick={() => {
-                      setContextMenu(null);
-                      handleSendVaultPassword();
-                    }}
-                    disabled={!isVaultUnlocked}
-                    className={`w-full flex items-center space-x-2 px-3 py-1.5 text-left transition ${
-                      isVaultUnlocked ? 'hover:bg-sky-600/20 text-slate-200' : 'text-plinky-muted cursor-not-allowed'
-                    }`}
-                  >
-                    <Key className="w-3.5 h-3.5 text-slate-400" />
-                    <span>Send Login Password</span>
-                  </button>
-                )}
-                <button
-                  onClick={() => {
-                    setContextMenu(null);
-                    requestEnablePassword();
-                  }}
-                  aria-keyshortcuts="Control+Shift+E"
-                  className="w-full flex items-center space-x-2 px-3 py-1.5 text-left transition hover:bg-sky-600/20 text-slate-200"
-                >
-                  <Shield className="w-3.5 h-3.5 text-slate-400" />
-                  <span className="flex-1 whitespace-nowrap">Send Enable Password</span>
-                  <span className="text-meta text-plinky-muted whitespace-nowrap">Ctrl+Shift+E</span>
-                </button>
-              </>
-            )}
-            <div className="border-t border-plinky-800 my-1" />
-            <button
-              onClick={handleClearScrollback}
-              className="w-full flex items-center space-x-2 px-3 py-1.5 hover:bg-sky-600/30 hover:text-sky-200 text-left transition"
-            >
-              <Trash2 className="w-3.5 h-3.5 text-slate-400" />
-              <span>Clear Scrollback</span>
-            </button>
-            <button
-              onClick={handleResetTerminal}
-              className="w-full flex items-center space-x-2 px-3 py-1.5 hover:bg-sky-600/30 hover:text-sky-200 text-left transition"
-            >
-              <RotateCcw className="w-3.5 h-3.5 text-rose-400" />
-              <span>Reset Terminal (RIS)</span>
-            </button>
-            <div className="border-t border-plinky-800 my-1" />
-            <button
-              onClick={() => {
-                setContextMenu(null);
-                setIsEventLogOpen(true);
-              }}
-              className="w-full flex items-center space-x-2 px-3 py-1.5 hover:bg-sky-600/30 hover:text-sky-200 text-left transition"
-            >
-              <List className="w-3.5 h-3.5 text-slate-400" />
-              <span>PuTTY Event Log...</span>
-            </button>
-            <button
-              onClick={() => {
-                setContextMenu(null);
-                setIsLoggingOpen(true);
-              }}
-              className="w-full flex items-center space-x-2 px-3 py-1.5 hover:bg-sky-600/30 hover:text-sky-200 text-left transition"
-            >
-              <FileText className="w-3.5 h-3.5 text-slate-400" />
-              <span>Session Logging...</span>
-            </button>
-            {onDuplicateTab && (
-              <button
-                onClick={() => {
-                  setContextMenu(null);
-                  onDuplicateTab(tab);
-                }}
-                className="w-full flex items-center space-x-2 px-3 py-1.5 hover:bg-sky-600/30 hover:text-sky-200 text-left transition"
-              >
-                <Copy className="w-3.5 h-3.5 text-slate-400" />
-                <span>Duplicate Session</span>
-              </button>
-            )}
-            {isTauriEnvironment() && tab.status !== 'disconnected' && !runningScript && (
-              <button
-                onClick={() => { void handleRunScript(); }}
-                className="w-full flex items-center space-x-2 px-3 py-1.5 hover:bg-sky-600/30 hover:text-sky-200 text-left transition"
-              >
-                <FileCode className="w-3.5 h-3.5 text-slate-400" />
-                <span>Run Script...</span>
-              </button>
-            )}
-            {/* This session's own settings (owner), and the defaults for
-                every session behind the title bar's gear. */}
-            {onEditSessionSettings && (
-              <button
-                onClick={() => {
-                  setContextMenu(null);
-                  onEditSessionSettings();
-                }}
-                className="w-full flex items-center space-x-2 px-3 py-1.5 hover:bg-sky-600/30 hover:text-sky-200 text-left transition"
-              >
-                <SettingsIcon className="w-3.5 h-3.5 text-sky-400" />
-                <span>Change Session Settings…</span>
-              </button>
-            )}
-            {onOpenSettings && (
-              <button
-                onClick={() => {
-                  setContextMenu(null);
-                  onOpenSettings();
-                }}
-                className="w-full flex items-center space-x-2 px-3 py-1.5 hover:bg-sky-600/30 hover:text-sky-200 text-left transition"
-              >
-                <SettingsIcon className="w-3.5 h-3.5 text-slate-400" />
-                <span>Global Settings…</span>
-              </button>
-            )}
-            {tab.status === 'disconnected' && (
-              <button
-                onClick={() => { setContextMenu(null); handleManualReconnect(); }}
-                className="w-full flex items-center space-x-2 px-3 py-1.5 hover:bg-sky-600/30 hover:text-sky-200 text-left transition"
-              >
-                <RotateCcw className="w-3.5 h-3.5 text-slate-400" />
-                <span>Reconnect</span>
-              </button>
-            )}
-            <div className="border-t border-plinky-800 my-1" />
-            <button
-              onClick={() => {
-                setContextMenu(null);
-                setIsSearchOpen(true);
-                setTimeout(() => searchInputRef.current?.focus(), 50);
-              }}
-              className="w-full flex items-center space-x-2 px-3 py-1.5 hover:bg-sky-600/30 hover:text-sky-200 text-left transition"
-            >
-              <Search className="w-3.5 h-3.5 text-slate-400" />
-              <span>Find in Terminal...</span>
-            </button>
-            {tab.protocol === 'Serial' && (
-              <>
-                <div className="border-t border-plinky-800 my-1" />
-                <button
-                  onClick={() => {
-                    setContextMenu(null);
-                    // A serial Break (held ~400 ms): Cisco ROMMON and similar
-                    // password recovery need it during boot. Only a serial
-                    // line can send one (ADR-005).
-                    sendBreak(tab.id)
-                      .then(() => addEventLog('Sent a serial Break', 'info'))
-                      .catch(e => addEventLog(`Send Break failed: ${String(e)}`, 'error'));
-                  }}
-                  title="Hold a Break condition on the line for 400 ms (ROMMON / password recovery)"
-                  className="w-full flex items-center space-x-2 px-3 py-1.5 hover:bg-sky-600/30 hover:text-sky-200 text-left transition"
-                >
-                  <Zap className="w-3.5 h-3.5 text-slate-400" />
-                  <span>Send Break</span>
-                </button>
-              </>
-            )}
-            {supportsShellHooks && (
-              <>
-                <div className="border-t border-plinky-800 my-1" />
-                <div
-                  className="px-3 pt-1 pb-0.5 flex items-center space-x-2 text-slate-400"
-                  title="Optional. Teaches the remote Unix shell to report prompts and its current directory (SFTP folder-following, Ctrl+Up/Down prompt jumping). Not for network devices."
-                >
-                  <Zap className="w-3.5 h-3.5 text-slate-400" />
-                  <span>
-                    {hooksInjected ? `Shell hooks active (${hooksInjected})` : 'Shell hooks for:'}
-                  </span>
-                </div>
-                {!hooksInjected && (
-                  <div className="px-3 pb-1.5 flex items-center space-x-1">
-                    {(['bash', 'zsh', 'fish'] as const).map(shell => (
-                      <button
-                        key={shell}
-                        onClick={() => handleInjectHooks(shell)}
-                        title={shell === lastHooksShell ? 'Last used for this session' : undefined}
-                        className={`flex-1 py-0.5 rounded border font-mono text-meta transition ${
-                          shell === lastHooksShell
-                            ? 'border-sky-500/50 bg-sky-500/15 text-sky-200'
-                            : 'border-plinky-700 text-slate-300 hover:bg-sky-600/30 hover:text-sky-200'
-                        }`}
-                      >
-                        {shell}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </>
-            )}
-            {onSplitPane && (
-              <>
-                <div className="border-t border-plinky-800 my-1" />
-                <button
-                  onClick={() => {
-                    onSplitPane('vertical');
-                    setContextMenu(null);
-                  }}
-                  className="w-full flex items-center space-x-2 px-3 py-1.5 hover:bg-sky-600/30 hover:text-sky-200 text-left transition"
-                >
-                  <Columns className="w-3.5 h-3.5 text-sky-400" />
-                  <span>Split Vertically</span>
-                </button>
-                <button
-                  onClick={() => {
-                    onSplitPane('horizontal');
-                    setContextMenu(null);
-                  }}
-                  className="w-full flex items-center space-x-2 px-3 py-1.5 hover:bg-sky-600/30 hover:text-sky-200 text-left transition"
-                >
-                  <Rows className="w-3.5 h-3.5 text-sky-400" />
-                  <span>Split Horizontally</span>
-                </button>
-              </>
-            )}
-          </div>
+          <TerminalContextMenu
+            position={contextMenu}
+            menuRef={contextMenuRef}
+            onCopy={handleCopy}
+            onPaste={handlePaste}
+            onSelectAll={handleSelectAll}
+            vault={{ shown: !isLocalSession, key: vaultKey, hasLogin: vault?.hasLoginSecret !== false, unlocked: isVaultUnlocked }}
+            onSendLoginPassword={() => { setContextMenu(null); handleSendVaultPassword(); }}
+            onSendEnablePassword={() => { setContextMenu(null); requestEnablePassword(); }}
+            onClearScrollback={handleClearScrollback}
+            onResetTerminal={handleResetTerminal}
+            onOpenEventLog={() => { setContextMenu(null); setIsEventLogOpen(true); }}
+            onOpenSessionLog={() => { setContextMenu(null); setIsLoggingOpen(true); }}
+            onDuplicate={onDuplicateTab ? () => { setContextMenu(null); onDuplicateTab(tab); } : undefined}
+            onRunScript={isTauriEnvironment() && tab.status !== 'disconnected' && !runningScript ? () => { void handleRunScript(); } : undefined}
+            onEditSessionSettings={onEditSessionSettings ? () => { setContextMenu(null); onEditSessionSettings(); } : undefined}
+            onOpenSettings={onOpenSettings ? () => { setContextMenu(null); onOpenSettings(); } : undefined}
+            onReconnect={tab.status === 'disconnected' ? () => { setContextMenu(null); handleManualReconnect(); } : undefined}
+            onFind={() => {
+              setContextMenu(null);
+              setIsSearchOpen(true);
+              setTimeout(() => searchInputRef.current?.focus(), 50);
+            }}
+            onSendBreak={tab.protocol === 'Serial' ? () => {
+              setContextMenu(null);
+              // A serial Break (held ~400 ms): Cisco ROMMON and similar
+              // password recovery need it during boot. Only a serial line
+              // can send one (ADR-005).
+              sendBreak(tab.id)
+                .then(() => addEventLog('Sent a serial Break', 'info'))
+                .catch(e => addEventLog(`Send Break failed: ${String(e)}`, 'error'));
+            } : undefined}
+            shellHooks={supportsShellHooks ? { injected: hooksInjected, lastShell: lastHooksShell, onInject: handleInjectHooks } : undefined}
+            onSplitPane={onSplitPane ? (direction) => { onSplitPane(direction); setContextMenu(null); } : undefined}
+          />
         )}
 
         {/* PuTTY Event Log Modal */}
