@@ -4620,7 +4620,7 @@ dependencies = [
 
 [[package]]
 name = "thyrion"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "libc",
  "plinky-core",
