@@ -25,6 +25,73 @@ export async function waitUntil(check, { timeoutMs = 5000, what = 'condition' } 
   }
 }
 
+// The running config `show running-config` prints. A few lines are traps
+// for the pipe tests: a description that ends in a space, one with two
+// spaces inside, one in Greek, and addresses a careless regex mixes up
+// (10.1.1.1 and 10.11.1.1).
+export const RUNNING_CONFIG = [
+  'Building configuration...',
+  '',
+  'Current configuration : 1024 bytes',
+  '!',
+  'version 15.7',
+  'hostname R1',
+  '!',
+  'interface Loopback0',
+  ' description router id',
+  ' ip address 10.255.0.1 255.255.255.255',
+  '!',
+  'interface GigabitEthernet0/0',
+  ' description uplink to core ',
+  ' ip address 10.1.1.1 255.255.255.252',
+  '!',
+  'interface GigabitEthernet0/1',
+  ' description backup  link',
+  ' ip address 10.1.2.1 255.255.255.252',
+  '!',
+  'interface GigabitEthernet0/2',
+  ' description uplink to core-2',
+  ' ip address 10.11.1.1 255.255.255.0',
+  '!',
+  'interface GigabitEthernet0/3',
+  ' description Αθήνα γραφείο',
+  ' no ip address',
+  ' shutdown',
+  '!',
+  'ip access-list extended MGMT',
+  ' permit tcp 10.0.0.0 0.255.255.255 any eq 22',
+  ' deny   ip any any log',
+  '!',
+  'line vty 0 4',
+  ' transport input ssh',
+  ' login local',
+  '!',
+  'end',
+];
+
+const PIPE_FILTERS = ['include', 'exclude', 'begin', 'section', 'count'];
+
+/** IOS's output filters, on output whose lines end in CR LF. */
+export function filterOutput(out, kind, pattern) {
+  const re = new RegExp(pattern);
+  const lines = out.split('\r\n');
+  if (lines.at(-1) === '') lines.pop();
+  let kept;
+  if (kind === 'include') kept = lines.filter((l) => re.test(l));
+  else if (kind === 'exclude') kept = lines.filter((l) => !re.test(l));
+  else if (kind === 'begin') { const i = lines.findIndex((l) => re.test(l)); kept = i < 0 ? [] : lines.slice(i); }
+  else if (kind === 'section') {
+    // A matching line and the indented lines under it.
+    kept = [];
+    let inside = false;
+    for (const l of lines) {
+      if (!l.startsWith(' ')) inside = re.test(l);
+      if (inside) kept.push(l);
+    }
+  } else return `Number of lines which match regexp = ${lines.filter((l) => re.test(l)).length}\r\n`;
+  return kept.map((l) => `${l}\r\n`).join('');
+}
+
 /**
  * A router console on a telnet port, the way GNS3 serves one.
  *
@@ -92,6 +159,25 @@ export async function startConsole({ name = 'R1', negotiate = true, host = '127.
       }
       if (enableSecret !== null && cmd === 'disable') { con.enabled = false; prompt = userPrompt; say(`\r\n${prompt}`); return; }
       if (cmd === 'exit') { say('\r\n'); sock.end(); return; }
+      // `show ... | include|exclude|begin|section|count <regex>`, as IOS
+      // filters output. The pattern is everything after the keyword, a
+      // trailing space included, so a test can tell whether one arrived.
+      const pipe = text.match(/^(.*?)\s\|\s*(\S+)(?:\s+(.*))?$/s);
+      if (pipe) {
+        const [, base, kind, pattern] = pipe;
+        if (!PIPE_FILTERS.includes(kind)) { say(`\r\n% Invalid input detected at '^' marker.\r\n\r\n${prompt}`); return; }
+        if (!pattern) { say(`\r\n% Incomplete command.\r\n\r\n${prompt}`); return; }
+        let filtered;
+        try { filtered = filterOutput(answer(base.trim()), kind, pattern); }
+        catch { say(`\r\n% Invalid regular expression\r\n${prompt}`); return; }
+        say(`\r\n${filtered}${prompt}`);
+        return;
+      }
+      say(`\r\n${answer(cmd)}${prompt}`);
+    };
+
+    // What a command prints, before any filter.
+    const answer = (cmd) => {
       let out = '';
       const big = cmd.match(/^show big (\d+)$/);
       if (big) {
@@ -107,11 +193,13 @@ export async function startConsole({ name = 'R1', negotiate = true, host = '127.
       } else if (cmd === 'show size') {
         const s = con.naws.at(-1);
         out = s ? `size ${s.cols}x${s.rows}\r\n` : 'size unknown\r\n';
+      } else if (/^show run(?:ning-config)?$/.test(cmd)) {
+        out = RUNNING_CONFIG.map((l) => `${l}\r\n`).join('');
       } else if (cmd) {
         // `replies` lets the screenshot lab answer like a real device.
         out = replies?.(cmd) ?? `you typed: ${cmd}\r\n`;
       }
-      say(`\r\n${out}${prompt}`);
+      return out;
     };
 
     const onData = (b) => {

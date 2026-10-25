@@ -91,6 +91,32 @@ export const tests = [
     assert.ok(Date.now() - started < 3000);
   }],
 
+  // Pipes in the remote shell: the characters reach bash as typed, and a
+  // pipeline's answer shows whole. Markers are the answer's own lines, so
+  // the echoed command cannot match them.
+  ['a pipeline over 20,000 lines answers with the right count', async ({ app }) => {
+    const want = Array.from({ length: 20000 }, (_, i) => String(i + 1)).filter((n) => n.includes('7')).length;
+    const screen = await shell(app, 'echo "count=$(seq 1 20000 | grep -c 7)"', /^count=\d+$/m);
+    assert.equal(Number(screen.match(/^count=(\d+)$/m)[1]), want);
+  }],
+
+  ['trailing spaces typed into a pipeline reach the shell', async ({ app }) => {
+    // cat -A marks each line's end with $, so the spaces before it show.
+    const screen = await shell(app, "printf 'end  \\n' | cat -A", /^end {2}\$$/m);
+    assert.match(screen, /^end {2}\$$/m);
+  }],
+
+  ['quotes, $, \\ and | inside quoted arguments reach the shell unchanged', async ({ app }) => {
+    const screen = await shell(app, `echo 'a|b' "c\\$d" '"q"' 'e\\f' | tr '|' '_'`, /^a_b c\$d "q" e\\f$/m);
+    assert.match(screen, /^a_b c\$d "q" e\\f$/m);
+  }],
+
+  ['a pipeline that fails part way reports it, and the shell stays usable', async ({ app }) => {
+    const screen = await shell(app, 'false | cat; echo "status=${PIPESTATUS[0]}/${PIPESTATUS[1]}"', /^status=\d+\/\d+$/m);
+    assert.match(screen, /^status=1\/0$/m);
+    assert.match(await shell(app, 'echo "still=$((40+2))"', /^still=42$/m), /still=42/);
+  }],
+
   ['a second connection does not ask about the key again', async ({ app }) => {
     await app.run((e) => e.dblclick(document.querySelector('[data-session-row="Lab Server"]')));
     await app.waitFor((e) => e.tabs().length === 2, [], { what: 'a second tab' });
