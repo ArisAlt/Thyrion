@@ -6,14 +6,19 @@ import { startConsole, writePuttySession, waitUntil, freePort } from '../lib/fix
 
 export const title = 'The app: local shell, GNS3 hand-over, session list';
 
-export async function setup({ home }) {
+export async function setup({ home, defer }) {
   // Enough saved sessions that the list has to scroll.
   for (let i = 1; i <= 60; i++) {
     writePuttySession(home, `Router ${String(i).padStart(2, '0')}`, {
       HostName: '192.0.2.1', PortNumber: 5000 + i, Protocol: 'telnet',
     });
   }
-  const consoles = await Promise.all(['R1', 'R2', 'R3', 'R4'].map((name) => startConsole({ name })));
+  const consoles = [];
+  for (const name of ['R1', 'R2', 'R3', 'R4']) {
+    const con = await startConsole({ name });
+    defer(() => con.stop());
+    consoles.push(con);
+  }
   // A console saved as a session, opened from the list.
   writePuttySession(home, 'Core R4', { HostName: '127.0.0.1', PortNumber: consoles[3].port, Protocol: 'telnet' });
   return {
@@ -21,7 +26,6 @@ export async function setup({ home }) {
     // the throwaway home.
     env: process.platform === 'win32' ? {} : { SHELL: '/bin/bash' },
     state: { consoles },
-    cleanup: () => Promise.all(consoles.map((c) => c.stop())),
   };
 }
 
@@ -84,7 +88,7 @@ export const tests = [
       launchAgain(app, ['--telnet', '127.0.0.1', String(r3.port), '--title', 'R3']),
     ]);
     await waitUntil(() => r2.connections === 1 && r3.connections === 1, { what: 'both consoles connected', timeoutMs: 5000 });
-    await sleep(1500);
+    await app.waitFor((e) => ['R2', 'R3'].every((name) => e.tabs().some((t) => t.title === name && t.status === 'live')), [], { what: 'both background tabs to be ready' });
     const tabs = (await app.tabs()).filter((t) => t.title === 'R2' || t.title === 'R3');
     assert.deepEqual(tabs.map((t) => `${t.title}:${t.status}`).sort(), ['R2:live', 'R3:live']);
   }],
@@ -105,7 +109,7 @@ export const tests = [
       return t && t.status !== 'connecting' ? t : null;
     }, { what: 'the tab behind to settle', timeoutMs: 8000 }).catch(async () => (await app.tabs()).find((t) => t.title === 'Down'));
     await app.run((e) => e.click(e.tabEl('Down')));
-    await sleep(1000);
+    await app.waitForTab('Down', 'disconnected');
     const opened = (await app.tabs()).find((t) => t.title === 'Down');
     assert.deepEqual({ behind: behind.status, opened: opened.status }, { behind: 'disconnected', opened: 'disconnected' });
   }],

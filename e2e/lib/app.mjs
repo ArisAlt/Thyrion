@@ -13,11 +13,12 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import os from 'node:os';
 import { Inspector, CdpInspector } from './inspector.mjs';
-import { isWindows, killTree, windowsDiagnosis, DEVTOOLS_PORT } from './windows.mjs';
+import { isWindows, windowsDiagnosis, DEVTOOLS_PORT } from './windows.mjs';
 import { installHelpers } from './page.mjs';
 import { freePort, waitUntil } from './fixtures.mjs';
+import { stopProcess } from './process.mjs';
 
-export async function launchApp({ binary, display, home, args = [], env = {}, log: logFile }) {
+export async function launchApp({ binary, display, home, args = [], env = {}, log: logFile, onStart = () => {} }) {
   // Short: socket paths are limited to 108 bytes. (Windows has no sockets
   // here; the folder is only cleaned up.)
   const runtime = fs.mkdtempSync(isWindows ? path.join(os.tmpdir(), 'pe2e-') : '/tmp/pe2e-');
@@ -50,15 +51,33 @@ export async function launchApp({ binary, display, home, args = [], env = {}, lo
   // Its own process group on Unix, so stop() ends plink with it; Windows
   // ends the tree with taskkill instead.
   const child = spawn(binary, args, { env: appEnv, stdio: ['ignore', out, out], detached: !isWindows });
+  fs.closeSync(out);
   let exited = null;
+  let spawnError;
+  child.on('error', (error) => { spawnError = error; exited = { error: error.message }; });
   child.on('exit', (code, signal) => { exited = { code, signal }; });
 
   let inspector;
+  let stopping;
+  const controller = new AbortController();
+  const stop = () => {
+    if (!stopping) stopping = (async () => {
+      controller.abort(new Error('the app has stopped'));
+      inspector?.close();
+      await stopProcess(child, { group: true });
+      fs.rmSync(runtime, { recursive: true, force: true });
+    })();
+    return stopping;
+  };
   try {
-    inspector = await (isWindows ? CdpInspector : Inspector).connect(port, { timeoutMs: 30000 });
+    onStart(stop);
+    inspector = await (isWindows ? CdpInspector : Inspector).connect(port, { timeoutMs: 30000, signal: controller.signal });
+    if (spawnError) throw spawnError;
+    if (exited) throw new Error('the launched app exited before the inspector connected');
   } catch (e) {
+    inspector?.close();
     const why = isWindows ? windowsDiagnosis(port, child) : '';
-    if (isWindows) killTree(child.pid); else child.kill('SIGKILL');
+    await stop();
     throw new Error(`${e.message}${why}\n--- app log ---\n${fs.readFileSync(log, 'utf8').slice(-3000)}`);
   }
 
@@ -68,6 +87,7 @@ export async function launchApp({ binary, display, home, args = [], env = {}, lo
 
     /** Runs fn(e2e, ...args) in the page; e2e is the helper object. */
     async run(fn, ...fnArgs) {
+      if (stopping || exited) throw new Error('the app has stopped');
       return inspector.evaluate(`(${installHelpers})() && (${fn})(window.__e2e, ...${JSON.stringify(fnArgs)})`);
     },
 
@@ -78,6 +98,7 @@ export async function launchApp({ binary, display, home, args = [], env = {}, lo
       let last;
       try {
         return await waitUntil(async () => {
+          if (stopping || exited) throw new Error('the app has stopped');
           try {
             return (last = await app.run(fn, ...fnArgs));
           } catch (e) {
@@ -117,19 +138,15 @@ export async function launchApp({ binary, display, home, args = [], env = {}, lo
       );
     },
 
-    async stop() {
-      inspector.close();
-      if (!exited && isWindows) {
-        killTree(child.pid);
-        await waitUntil(() => exited, { timeoutMs: 5000 }).catch(() => {});
-      } else if (!exited) {
-        try { process.kill(-child.pid, 'SIGTERM'); } catch { /* gone */ }
-        await waitUntil(() => exited, { timeoutMs: 3000 }).catch(() => {
-          try { process.kill(-child.pid, 'SIGKILL'); } catch { /* gone */ }
-        });
-      }
-      fs.rmSync(runtime, { recursive: true, force: true });
+    async closeWindow() {
+      // Closing the native window lets WebKit/WebView2 flush localStorage.
+      // SIGTERM/taskkill tests a crash and can lose a just-saved layout.
+      try { await app.invoke('plugin:window|close', { label: 'main' }); }
+      catch (e) { if (!/closed|stopped/.test(e.message)) throw e; }
+      await waitUntil(() => exited, { what: 'the original app to exit', timeoutMs: 10000 });
     },
+    stop,
+
   };
 
   // The page is up once the session list has rendered. If it never is, stop

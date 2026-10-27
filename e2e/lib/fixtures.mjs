@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { isWindows, writeRegistrySession } from './windows.mjs';
+import { stopProcess } from './process.mjs';
 
 const IAC = 255, DONT = 254, DO = 253, WONT = 252, WILL = 251, SB = 250, SE = 240;
 const TTYPE = 24, TTYPE_IS = 0, TTYPE_SEND = 1;
@@ -24,6 +25,72 @@ export async function waitUntil(check, { timeoutMs = 5000, what = 'condition' } 
   }
 }
 
+// The running config `show running-config` prints. A few lines are traps
+// for the pipe tests: a description that ends in a space, one with two
+// spaces inside, one in Greek, and addresses a careless regex mixes up
+// (10.1.1.1 and 10.11.1.1).
+export const RUNNING_CONFIG = [
+  'Building configuration...',
+  '',
+  'Current configuration : 1024 bytes',
+  '!',
+  'version 15.7',
+  'hostname R1',
+  '!',
+  'interface Loopback0',
+  ' description router id',
+  ' ip address 10.255.0.1 255.255.255.255',
+  '!',
+  'interface GigabitEthernet0/0',
+  ' description uplink to core ',
+  ' ip address 10.1.1.1 255.255.255.252',
+  '!',
+  'interface GigabitEthernet0/1',
+  ' description backup  link',
+  ' ip address 10.1.2.1 255.255.255.252',
+  '!',
+  'interface GigabitEthernet0/2',
+  ' description uplink to core-2',
+  ' ip address 10.11.1.1 255.255.255.0',
+  '!',
+  'interface GigabitEthernet0/3',
+  ' description Αθήνα γραφείο',
+  ' no ip address',
+  ' shutdown',
+  '!',
+  'ip access-list extended MGMT',
+  ' permit tcp 10.0.0.0 0.255.255.255 any eq 22',
+  ' deny   ip any any log',
+  '!',
+  'line vty 0 4',
+  ' transport input ssh',
+  ' login local',
+  '!',
+  'end',
+];
+
+const PIPE_FILTERS = ['include', 'exclude', 'begin', 'section', 'count'];
+
+/** IOS's output filters, on output whose lines end in CR LF. */
+export function filterOutput(out, kind, re) {
+  const lines = out.split('\r\n');
+  if (lines.at(-1) === '') lines.pop();
+  let kept;
+  if (kind === 'include') kept = lines.filter((l) => re.test(l));
+  else if (kind === 'exclude') kept = lines.filter((l) => !re.test(l));
+  else if (kind === 'begin') { const i = lines.findIndex((l) => re.test(l)); kept = i < 0 ? [] : lines.slice(i); }
+  else if (kind === 'section') {
+    // A matching line and the indented lines under it.
+    kept = [];
+    let inside = false;
+    for (const l of lines) {
+      if (!l.startsWith(' ')) inside = re.test(l);
+      if (inside) kept.push(l);
+    }
+  } else return `Number of lines which match regexp = ${lines.filter((l) => re.test(l)).length}\r\n`;
+  return kept.map((l) => `${l}\r\n`).join('');
+}
+
 /**
  * A router console on a telnet port, the way GNS3 serves one.
  *
@@ -36,7 +103,7 @@ export async function waitUntil(check, { timeoutMs = 5000, what = 'condition' } 
  * Nothing is printed on connect: a router sitting at its prompt prints
  * nothing until it is sent Enter.
  */
-export async function startConsole({ name = 'R1', negotiate = true, host = '127.0.0.1', onlyFrom = null, greet = false, mark = '>', replies = null, port = 0, enableSecret = null } = {}) {
+export async function startConsole({ name = 'R1', negotiate = true, host = '127.0.0.1', onlyFrom = null, greet = false, mark = '>', replies = null, port = 0, enableSecret = null, patterns = [] } = {}) {
   const con = {
     name,
     received: Buffer.alloc(0), // data bytes, telnet commands removed
@@ -48,7 +115,14 @@ export async function startConsole({ name = 'R1', negotiate = true, host = '127.
     open: 0,
     sockets: new Set(),
     enabled: false,            // in privileged mode (enableSecret)
+    // The filter patterns the test will send, compiled here from the test's
+    // own strings. What arrives only picks one: text from the socket never
+    // becomes a regex, and a pattern that arrives changed (a lost trailing
+    // space) is one the console does not know.
+    patterns: new Map(),
   };
+  con.addPattern = (p) => { con.patterns.set(p, new RegExp(p)); };
+  patterns.forEach(con.addPattern);
   const userPrompt = `${name}${mark}`;
   let prompt = userPrompt;
 
@@ -91,6 +165,24 @@ export async function startConsole({ name = 'R1', negotiate = true, host = '127.
       }
       if (enableSecret !== null && cmd === 'disable') { con.enabled = false; prompt = userPrompt; say(`\r\n${prompt}`); return; }
       if (cmd === 'exit') { say('\r\n'); sock.end(); return; }
+      // `show ... | include|exclude|begin|section|count <regex>`, as IOS
+      // filters output. The pattern is everything after the keyword, a
+      // trailing space included; it must be one of `patterns`.
+      const pipe = text.match(/^(.*?)\s\|\s*(\S+)(?:\s+(.*))?$/s);
+      if (pipe) {
+        const [, base, kind, pattern] = pipe;
+        if (!PIPE_FILTERS.includes(kind)) { say(`\r\n% Invalid input detected at '^' marker.\r\n\r\n${prompt}`); return; }
+        if (!pattern) { say(`\r\n% Incomplete command.\r\n\r\n${prompt}`); return; }
+        const re = con.patterns.get(pattern);
+        if (!re) { say(`\r\n% Unknown pattern (not given to startConsole): ${JSON.stringify(pattern)}\r\n${prompt}`); return; }
+        say(`\r\n${filterOutput(answer(base.trim()), kind, re)}${prompt}`);
+        return;
+      }
+      say(`\r\n${answer(cmd)}${prompt}`);
+    };
+
+    // What a command prints, before any filter.
+    const answer = (cmd) => {
       let out = '';
       const big = cmd.match(/^show big (\d+)$/);
       if (big) {
@@ -106,11 +198,13 @@ export async function startConsole({ name = 'R1', negotiate = true, host = '127.
       } else if (cmd === 'show size') {
         const s = con.naws.at(-1);
         out = s ? `size ${s.cols}x${s.rows}\r\n` : 'size unknown\r\n';
+      } else if (/^show run(?:ning-config)?$/.test(cmd)) {
+        out = RUNNING_CONFIG.map((l) => `${l}\r\n`).join('');
       } else if (cmd) {
         // `replies` lets the screenshot lab answer like a real device.
         out = replies?.(cmd) ?? `you typed: ${cmd}\r\n`;
       }
-      say(`\r\n${out}${prompt}`);
+      return out;
     };
 
     const onData = (b) => {
@@ -181,7 +275,9 @@ export async function startConsole({ name = 'R1', negotiate = true, host = '127.
   };
 
   const server = net.createServer(handle);
-  await new Promise((r, j) => { server.once('error', j); server.listen(port, host, r); });
+  try {
+    await new Promise((r, j) => { server.once('error', j); server.listen(port, host, r); });
+  } catch (e) { server.close(); throw e; }
   con.port = server.address().port;
 
   con.text = () => con.received.toString('latin1');
@@ -214,8 +310,7 @@ export async function startSshd(dir, { sftp = false, prompt = 'e2e$ ', sftpDir =
   execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', f('client_key')]);
   fs.copyFileSync(f('client_key.pub'), f('authorized_keys'));
   execFileSync('puttygen', [f('client_key'), '-o', f('client_key.ppk'), '-O', 'private']);
-  const fingerprint = execFileSync('ssh-keygen', ['-l', '-E', 'sha256', '-f', f('host_key.pub')])
-    .toString().split(' ')[1];
+  const fingerprint = () => execFileSync('ssh-keygen', ['-l', '-E', 'sha256', '-f', f('host_key.pub')]).toString().split(' ')[1];
 
   // ForceCommand replaces the sftp subsystem too; with `sftp` the
   // subsystem's own command, which sshd passes in SSH_ORIGINAL_COMMAND, is
@@ -251,23 +346,46 @@ export async function startSshd(dir, { sftp = false, prompt = 'e2e$ ', sftpDir =
     `ForceCommand ${f('login.sh')}`,
     '',
   ].join('\n'));
-  const child = spawn(sshd, ['-D', '-e', '-f', f('sshd_config')], { stdio: ['ignore', 'ignore', fs.openSync(f('sshd.log'), 'a')] });
-  await waitUntil(() => new Promise((r) => {
-    const s = net.connect(port, '127.0.0.1', () => { s.destroy(); r(true); });
-    s.on('error', () => r(false));
-  }), { what: 'sshd to listen', timeoutMs: 5000 });
+  let child;
+  const start = async () => {
+    const log = fs.openSync(f('sshd.log'), 'a');
+    child = spawn(sshd, ['-D', '-e', '-f', f('sshd_config')], { stdio: ['ignore', 'ignore', log] });
+    fs.closeSync(log);
+    let spawnError;
+    child.on('error', (e) => { spawnError = e; });
+    try {
+      await waitUntil(() => {
+        if (spawnError) throw spawnError;
+        if (child.exitCode !== null) throw new Error(fs.readFileSync(f('sshd.log'), 'utf8'));
+        return new Promise((resolve) => {
+          const socket = net.connect(port, '127.0.0.1', () => { socket.destroy(); resolve(true); });
+          socket.setTimeout(500, () => { socket.destroy(); resolve(false); });
+          socket.on('error', () => resolve(false));
+        });
+      }, { what: 'sshd to listen', timeoutMs: 5000 });
+    } catch (e) { await stopProcess(child); throw e; }
+  };
+  await start();
   return {
     port,
-    fingerprint,
+    get fingerprint() { return fingerprint(); },
     ppk: f('client_key.ppk'),
     log: () => fs.readFileSync(f('sshd.log'), 'utf8'),
-    stop: () => { child.kill(); },
+    stop: () => stopProcess(child),
+    async rotateHostKey() {
+      await stopProcess(child);
+      fs.unlinkSync(f('host_key'));
+      fs.unlinkSync(f('host_key.pub'));
+      execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', f('host_key')]);
+      await start();
+    },
   };
 }
 
 export function freePort() {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const s = net.createServer();
+    s.once('error', reject);
     s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
   });
 }
@@ -293,10 +411,20 @@ export async function startSerialDevice(dir, { name = 'R9' } = {}) {
   const appSide = path.join(dir, 'ttyE2E0');
   const deviceSide = path.join(dir, 'ttyE2E1');
   const socat = spawn('socat', [`pty,raw,echo=0,link=${appSide}`, `pty,raw,echo=0,link=${deviceSide}`], { stdio: 'ignore' });
-  await waitUntil(() => fs.existsSync(appSide) && fs.existsSync(deviceSide), { what: 'socat ptys', timeoutMs: 5000 });
+  let spawnError;
+  socat.on('error', (e) => { spawnError = e; });
+  try {
+    await waitUntil(() => {
+      if (spawnError) throw spawnError;
+      if (socat.exitCode !== null) throw new Error('socat exited before creating PTYs');
+      return fs.existsSync(appSide) && fs.existsSync(deviceSide);
+    }, { what: 'socat ptys', timeoutMs: 5000 });
+  } catch (e) { await stopProcess(socat); throw e; }
 
   const dev = { name, path: appSide, received: Buffer.alloc(0), lines: [] };
-  const fd = fs.openSync(deviceSide, fs.constants.O_RDWR | fs.constants.O_NOCTTY);
+  let fd;
+  try { fd = fs.openSync(deviceSide, fs.constants.O_RDWR | fs.constants.O_NOCTTY); }
+  catch (e) { await stopProcess(socat); throw e; }
   const say = (s) => { try { fs.writeSync(fd, Buffer.from(s, 'utf8')); } catch { /* line gone */ } };
   let line = '';
   const stream = fs.createReadStream(null, { fd, autoClose: false });
@@ -324,7 +452,12 @@ export async function startSerialDevice(dir, { name = 'R9' } = {}) {
   dev.waitForBytes = (s, opts = {}) =>
     waitUntil(() => dev.received.includes(Buffer.from(s)), { what: `${name} to receive ${JSON.stringify(s)}`, ...opts });
   /** The USB adapter pulled out: the line goes away. */
-  dev.unplug = () => { stream.destroy(); try { fs.closeSync(fd); } catch { /* closed */ } socat.kill(); };
+  let unplugging;
+  dev.unplug = () => unplugging ??= (async () => {
+    stream.destroy();
+    await stopProcess(socat);
+    try { fs.closeSync(fd); } catch { /* closed */ }
+  })();
   dev.stop = dev.unplug;
   return dev;
 }

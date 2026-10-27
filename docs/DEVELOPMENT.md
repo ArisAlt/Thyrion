@@ -111,18 +111,44 @@ cargo deny check
 # a private sshd and a socat serial line, on a hidden screen (Linux)
 npm run e2e -- --build      # builds a debug app first; later runs can skip --build
 npm run e2e -- --only paste # only tests whose name contains "paste"
+npm run test:e2e-runner     # runner lifecycle checks; no desktop build needed
+npm run e2e -- --strict-skips --keep # require fixtures and retain diagnostic logs
 ```
 
 The end-to-end suite (`e2e/`) drives the app's page through WebKitGTK's
 remote inspector, so it needs no WebDriver: Node 22+, `plink`, and either
 `kwin_wayland` (its `--virtual` screen) or `Xvfb`. The SSH tests also need
-`sshd`, `ssh-keygen` and `puttygen`; the serial tests need `socat`. Each
+`sshd`, `ssh-keygen` and `puttygen`; SFTP integrity tests also need `psftp`
+and the OpenSSH SFTP subsystem, and serial tests need `socat`. On Linux each
 scenario runs in a throwaway home directory with its own runtime directory
 and no session bus, so it never touches your sessions, host keys or vault,
 and never hands its tabs to a Thyrion you have open. Tests named "like PuTTY"
-expect PuTTY's default behaviour. CI runs the whole suite on every push and
-pull request (the `e2e-linux` job, Xvfb); a failed run keeps the app and
-sshd logs as the `e2e-profiles` artifact for a week.
+expect PuTTY's default behaviour. CI runs the suite on Linux (Xvfb) and
+Windows (WebView2). Windows runs only on disposable CI machines because it
+resets the PuTTY registry sessions and app profile. Its Unix SSH/SFTP and
+serial fixtures are explicitly skipped. Other missing fixtures fail CI;
+`--strict-skips` enables that policy locally too.
+
+Tests within a scenario are dependent steps. `--only` runs the selected
+steps and their prerequisites; an unmatched filter fails. Any failed or
+timed-out step stops that scenario, closes its resources, and marks later
+steps as blocked. The next scenario starts with a fresh profile. Fixtures
+register cleanup immediately, including during setup. Add new fixture
+cleanup with `ctx.defer(() => fixture.stop())` as soon as it is acquired.
+
+Restart tests use `ctx.restart()`: close the native window, wait for process
+exit, then launch a new process with the same profile. Always build with
+`--build` after updating the harness: the temporary test configuration grants
+native window-close permission and, on Windows, opens the inspector port.
+The release configuration is unchanged. Keyboard and mouse helpers dispatch
+DOM events, so native webview input behavior still needs separate coverage.
+
+The suite covers terminal input, full retained scrollback, session settings,
+host-key rejection/change, failed SSH authentication, SFTP binary transfers,
+vault lock/unlock and persistence, and broadcast channel/locked-tab isolation.
+SFTP transfer tests supply file paths through the real IPC bridge; they do
+not exercise native file pickers. Failed CI runs retain app and sshd logs
+for a week. Use `--keep` to retain local profiles and logs.
 
 The README's pictures (`docs/images/`) are the real app too, made by
 `node e2e/shots.mjs <outDir> [stills|gif]` on the same hidden screen: a
@@ -181,6 +207,5 @@ cargo tauri build
 > NO_STRIP=true cargo tauri build
 > ```
 > For release distributions targeting general Linux distributions, AppImages must be packaged within an older, pinned base container (e.g., Ubuntu 20.04/22.04 LTS) to guarantee glibc dynamic linker compatibility across target environments.
-
 
 

@@ -10,16 +10,18 @@ import { startConsole, writePuttySession, waitUntil } from '../lib/fixtures.mjs'
 
 export const title = 'Automatic session logs';
 
-export async function setup({ home }) {
+export async function setup({ home, defer }) {
   const r7 = await startConsole({ name: 'R7' });
+  defer(() => r7.stop());
   const r8 = await startConsole({ name: 'R8' });
+  defer(() => r8.stop());
   const r9 = await startConsole({ name: 'R9' });
+  defer(() => r9.stop());
   writePuttySession(home, 'Core R7', { HostName: '127.0.0.1', PortNumber: r7.port, Protocol: 'telnet', PlinkyFolder: 'Lab/Core' });
   writePuttySession(home, 'Quiet R8', { HostName: '127.0.0.1', PortNumber: r8.port, Protocol: 'telnet', PlinkyFolder: 'Lab', PlinkyAutoLog: '0' });
   writePuttySession(home, 'Always R7', { HostName: '127.0.0.1', PortNumber: r7.port, Protocol: 'telnet', PlinkyFolder: 'Lab', PlinkyAutoLog: '1' });
   return {
     state: { r7, r8, r9, logs: path.join(home, 'session-logs') },
-    cleanup: async () => { await r7.stop(); await r8.stop(); await r9.stop(); },
   };
 }
 

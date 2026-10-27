@@ -9,10 +9,23 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { waitUntil } from './fixtures.mjs';
+import { stopProcess } from './process.mjs';
 
 const has = (bin) => {
   try { execFileSync('which', [bin], { stdio: 'ignore' }); return true; } catch { return false; }
 };
+
+async function ready(child, check, what) {
+  let error;
+  child.on('error', (e) => { error = e; });
+  try {
+    await waitUntil(() => {
+      if (error) throw error;
+      if (child.exitCode !== null || child.signalCode !== null) throw new Error(`${what} exited before startup`);
+      return check();
+    }, { what, timeoutMs: 10000 });
+  } catch (e) { await stopProcess(child); throw e; }
+}
 
 export async function startDisplay({ runDir, visible = false, width = 1280, height = 860 }) {
   // A Windows CI runner's own desktop is a session nobody watches. On
@@ -35,6 +48,7 @@ export async function startDisplay({ runDir, visible = false, width = 1280, heig
 
   if (has('kwin_wayland')) {
     const rt = fs.mkdtempSync(path.join(runDir, 'kwin-'));
+    const log = fs.openSync(path.join(runDir, 'kwin.log'), 'a');
     const child = spawn('kwin_wayland', [
       '--virtual', '--socket', 'e2e', '--width', String(width), '--height', String(height), '--no-lockscreen',
     ], {
@@ -43,28 +57,31 @@ export async function startDisplay({ runDir, visible = false, width = 1280, heig
         // No session bus: KWin must not register with the user's desktop.
         DBUS_SESSION_BUS_ADDRESS: `unix:path=${rt}/no-bus`,
       },
-      stdio: ['ignore', fs.openSync(path.join(runDir, 'kwin.log'), 'a'), fs.openSync(path.join(runDir, 'kwin.log'), 'a')],
+      stdio: ['ignore', log, log],
     });
+    fs.closeSync(log);
     const socket = path.join(rt, 'e2e');
-    await waitUntil(() => fs.existsSync(socket), { what: 'the hidden KWin screen', timeoutMs: 10000 });
+    await ready(child, () => fs.existsSync(socket), 'the hidden KWin screen');
     return {
       kind: 'hidden KWin screen',
       // An absolute WAYLAND_DISPLAY: the app keeps its own XDG_RUNTIME_DIR.
       env: { WAYLAND_DISPLAY: socket, GDK_BACKEND: 'wayland', XDG_SESSION_TYPE: 'wayland' },
-      stop: () => child.kill(),
+      stop: () => stopProcess(child),
     };
   }
 
   if (has('Xvfb')) {
     const displayNo = 90 + Math.floor(Math.random() * 400);
+    const log = fs.openSync(path.join(runDir, 'xvfb.log'), 'a');
     const child = spawn('Xvfb', [`:${displayNo}`, '-screen', '0', `${width}x${height}x24`, '-nolisten', 'tcp'], {
-      stdio: ['ignore', 'ignore', fs.openSync(path.join(runDir, 'xvfb.log'), 'a')],
+      stdio: ['ignore', 'ignore', log],
     });
-    await waitUntil(() => fs.existsSync(`/tmp/.X11-unix/X${displayNo}`), { what: 'Xvfb', timeoutMs: 10000 });
+    fs.closeSync(log);
+    await ready(child, () => fs.existsSync(`/tmp/.X11-unix/X${displayNo}`), 'Xvfb');
     return {
       kind: 'Xvfb',
       env: { DISPLAY: `:${displayNo}`, GDK_BACKEND: 'x11', XDG_SESSION_TYPE: 'x11' },
-      stop: () => child.kill(),
+      stop: () => stopProcess(child),
     };
   }
 

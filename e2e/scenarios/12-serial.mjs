@@ -5,14 +5,15 @@ import { startSerialDevice, writePuttySession } from '../lib/fixtures.mjs';
 
 export const title = 'Serial console, from a saved session';
 
-export async function setup({ home, runDir }) {
+export async function setup({ home, runDir, defer }) {
   const dev = await startSerialDevice(path.join(runDir, 'serial'));
-  if (!dev) return { skip: 'needs socat' };
+  if (!dev) return { skip: 'needs socat', expectedSkip: process.platform === 'win32' };
+  defer(() => dev.stop());
   writePuttySession(home, 'Console Cable', {
     Protocol: 'serial', SerialLine: dev.path, SerialSpeed: 9600,
     SerialDataBits: 8, SerialStopHalfbits: 2, SerialParity: 0, SerialFlowControl: 0,
   });
-  return { state: { dev }, cleanup: () => dev.stop() };
+  return { state: { dev } };
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -47,7 +48,7 @@ export const tests = [
   ['Backspace sends DEL (0x7f), like PuTTY', async ({ app, dev }) => {
     dev.clear();
     await app.key('Backspace');
-    await sleep(150);
+    await dev.waitForBytes(Buffer.from([0x7f]));
     assert.deepEqual([...dev.received], [0x7f]);
   }],
 
@@ -120,7 +121,7 @@ export const tests = [
   }],
 
   ['pulling out the USB adapter shows the tab as disconnected', async ({ app, dev }) => {
-    dev.unplug();
+    await dev.unplug();
     await app.waitForTab('Console Cable', 'disconnected', { timeoutMs: 5000 });
   }],
 ];

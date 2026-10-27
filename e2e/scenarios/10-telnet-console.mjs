@@ -12,8 +12,9 @@ import { startConsole, waitUntil } from '../lib/fixtures.mjs';
 
 export const title = 'Telnet console, opened the way GNS3 opens it';
 
-export async function setup({ home }) {
+export async function setup({ home, defer }) {
   const r1 = await startConsole({ name: 'R1' });
+  defer(() => r1.stop());
   // The environment the unpacked AppImage gives Thyrion: its AppRun points
   // Python into its own folder. A script's python3 must not inherit it
   // (it died with "No module named 'encodings'").
@@ -28,7 +29,6 @@ export async function setup({ home }) {
     } : {},
     args: ['--telnet', '127.0.0.1', String(r1.port), '--title', 'R1'],
     state: { r1 },
-    cleanup: () => r1.stop(),
   };
 }
 
@@ -362,7 +362,7 @@ export const tests = [
     }
   }],
 
-  ['a long listing arrives complete and in order', async ({ app, r1 }) => {
+  ['a large output burst reaches its final lines in order within the time budget', async ({ app, r1 }) => {
     const n = 20000;
     const started = Date.now();
     await command(app, r1, `show big ${n}`);
@@ -381,7 +381,7 @@ export const tests = [
     r1.clear();
     await app.run((e) => e.focusTerminal());
     await app.key('Shift+PageUp');
-    await sleep(200);
+    await app.waitFor((e, rows) => JSON.stringify(e.screen()) !== JSON.stringify(rows), [before], { what: 'earlier output after scrolling' });
     const after = await app.screen();
     assert.notDeepEqual(after, before, 'the screen shows earlier output');
     const first = (lines) => Number(lines.find((l) => /^line \d+/.test(l))?.match(/^line (\d+)/)[1]);
@@ -438,10 +438,11 @@ export const tests = [
     await app.waitFor((e) => e.tabs().length === 2 && e.tabs().every((t) => t.status === 'live'), [], { what: 'two live tabs', timeoutMs: 3000 });
 
     await app.run((e) => e.focusTerminal());
+    const original = (await app.tabs()).find((t) => t.active).id;
     await app.key('Ctrl+Tab');
-    await sleep(300);
+    await app.waitFor((e, id) => e.tabs().some((t) => t.active && t.id !== id), [original], { what: 'the other console tab to become active' });
     await app.key('Ctrl+Tab');
-    await sleep(300);
+    await app.waitFor((e, id) => e.tabs().some((t) => t.active && t.id === id), [original], { what: 'the original console tab to become active again' });
     const tabs = await app.tabs();
     assert.deepEqual(tabs.map((t) => t.status), ['live', 'live']);
     void ctx;
@@ -600,7 +601,8 @@ export const tests = [
       const c = await getClipboard(app);
       return c.includes('END-OF-OUTPUT 3000') ? c : null;
     }, { what: 'the copy', timeoutMs: 5000 });
-    assert.match(copied, /line 000001 of 3000/, 'the first of 3,000 lines is still there');
+    const lines = [...copied.matchAll(/^line (\d+) of 3000 x+$/gm)].map((m) => Number(m[1]));
+    assert.deepEqual(lines, Array.from({ length: 3000 }, (_, i) => i + 1), 'all 3,000 lines are retained exactly once, in order');
     // Back to the default for the tests after this one.
     await app.run(() => { localStorage.removeItem('plinky_scrollback'); return true; });
   }, { timeoutMs: 40000 }],
