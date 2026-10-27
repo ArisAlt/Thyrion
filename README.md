@@ -87,6 +87,28 @@ Thyrion uses the PuTTY you already have installed, so install
 Get the latest version from the
 [Releases page](https://github.com/ArisAlt/Thyrion/releases).
 
+### Checking a download
+
+Every file on the Releases page is built from this repository by GitHub
+Actions. Releases after v0.2.13 also have a `SHA256SUMS.txt` with the
+checksum of every file, and GitHub keeps a signed record of which workflow and
+commit built each one. To check a file you downloaded:
+
+```bash
+# Built by this repository's release workflow? (GitHub CLI)
+gh attestation verify Thyrion_<version>_x64-setup.exe --repo ArisAlt/Thyrion
+
+# Matches the published checksum? (Linux; in the folder with SHA256SUMS.txt)
+sha256sum -c SHA256SUMS.txt --ignore-missing
+```
+
+On Windows, `Get-FileHash .\Thyrion_<version>_x64-setup.exe` prints the checksum
+to compare with the file's line in `SHA256SUMS.txt`.
+
+The Windows installers aren't code-signed yet (see below), so Windows
+SmartScreen may say "Windows protected your PC" and show the publisher as
+unknown. Choose **More info**, then **Run anyway**.
+
 ---
 
 ## Code signing policy
