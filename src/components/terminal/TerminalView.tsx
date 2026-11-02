@@ -542,6 +542,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       isLivePtyRef.current = true;
       for (const keys of heldInputRef.current.splice(0)) writeTerminalInput(tab.id, keys);
     };
+    // The ref follows at once, not at the next render: a prompt shown and
+    // answered automatically in the same chunk was left on screen, and its
+    // Send Password sent the secret a second time.
+    const showPrompt = (kind: typeof detectedPromptRef.current) => {
+      detectedPromptRef.current = kind;
+      setDetectedPasswordPrompt(kind);
+    };
     const handleIncomingChunk = (chunk: Uint8Array, live = true) => {
       if (disposed) return;
       goLive();
@@ -575,7 +582,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       if (status === 'ended') {
         endedRef.current = true;
         onUpdateTab(tab.id, { status: 'disconnected' });
-        setDetectedPasswordPrompt(null);
+        showPrompt(null);
         // A FATAL ERROR after the session was live is a dropped connection
         // ("Remote side unexpectedly closed", "Network error: ..."). A clean
         // `exit` prints no FATAL, and a failed login never reached live --
@@ -591,19 +598,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       } else if (status === 'preauth') {
         // The prompt is noticed as well, for the vault's offer.
         onUpdateTab(tab.id, { status: 'preauth' });
-        if (promptKind) setDetectedPasswordPrompt(promptKind);
+        if (promptKind) showPrompt(promptKind);
       } else if (status === 'live') {
         if (!reachedLiveRef.current && live) addEventLog(isLocalSession ? 'Shell ready' : 'Connected', 'success');
         onUpdateTab(tab.id, { status: 'live' }); // a no-op once it is (tabUpdate.ts)
-        if (detectedPromptRef.current !== null) setDetectedPasswordPrompt(null);
+        if (detectedPromptRef.current !== null) showPrompt(null);
         reachedLiveRef.current = true;
         reconnectAttemptRef.current = 0; // back up: the next drop starts over
       } else if (promptKind) {
         // A prompt the status stays the same for (a router's enable, one
         // split across chunks): the vault offers its password.
-        setDetectedPasswordPrompt(promptKind);
+        showPrompt(promptKind);
       }
-      if (answeredAutomatically && detectedPromptRef.current !== null) setDetectedPasswordPrompt(null);
+      if (answeredAutomatically && detectedPromptRef.current !== null) showPrompt(null);
     };
 
     // PuTTY Classic: Copy on select
