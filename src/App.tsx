@@ -31,6 +31,7 @@ import { placeName } from './services/sessionOrder';
 import { assignPanes, paneCount, placeInPane, samePanes, PANE_SLOTS, PaneSlots } from './services/paneLayout';
 import { fontSizeForKey, TERMINAL_FONT_MIN, TERMINAL_FONT_MAX, TERMINAL_FONT_DEFAULT } from './services/terminalFontKeys';
 import { saveLayout, loadLayout, clearLayout, opensAtStartup } from './services/layoutPersistence';
+import { withTabUpdate } from './services/tabUpdate';
 import { 
   X, 
   Lock,
@@ -528,7 +529,7 @@ export const App: React.FC = () => {
   };
 
   const handleUpdateTab = (tabId: string, updates: Partial<TerminalTab>) => {
-    setTabs(prev => prev.map(t => (t.id === tabId ? { ...t, ...updates } : t)));
+    setTabs(prev => withTabUpdate(prev, tabId, updates));
   };
 
   const handleSaveSession = async (newSession: PuttySession) => {

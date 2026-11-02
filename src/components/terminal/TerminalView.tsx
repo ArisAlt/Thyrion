@@ -42,7 +42,7 @@ import {
 import {
   classifyPasswordPrompt, appendRecentOutput, trackTypedInput, isCommandSubmission,
 } from '../../services/promptDetect';
-import { KeywordHighlighter } from '../../services/keywordHighlight';
+import { KeywordHighlighter, highlightPacer } from '../../services/keywordHighlight';
 import { shouldTakeHoverFocus } from '../../services/hoverFocus';
 import { useBroadcastGlow, glowColor } from '../../services/broadcast';
 import { SESSION_SAVED_EVENT, SessionSavedDetail, SessionLook, sessionLookFrom, pasteLineDelayFrom } from '../../services/appEvents';
@@ -262,6 +262,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   // host printed nothing for 35 s or more: a black terminal under a green
   // dot and a green "Terminal ready", which read as connected but hung.
   const [waitingSince, setWaitingSince] = useState<number | null>(null);
+  // The two above as they are now, for the output handler: it runs on every
+  // chunk (each byte, on a 9600-baud console), and setting state it already
+  // has still cost React a render each time.
+  const waitingSinceRef = useRef(waitingSince);
+  waitingSinceRef.current = waitingSince;
+  const detectedPromptRef = useRef(detectedPasswordPrompt);
+  detectedPromptRef.current = detectedPasswordPrompt;
   const [, setWaitTick] = useState(0);
   useEffect(() => {
     if (waitingSince === null) return;
@@ -461,18 +468,16 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const highlighter = new KeywordHighlighter(term, tab.activeHighlighting !== false);
     highlighterRef.current = highlighter;
     highlighter.setTheme(terminalThemeRef.current.theme, !!terminalThemeRef.current.light);
-    // Output arrives in many small chunks; decorate them in one pass a few
-    // ms later. (setTimeout, not requestAnimationFrame: rAF doesn't run
-    // while the window is hidden, and highlights would lag behind output.)
-    let scanQueued = false;
-    const scheduleHighlight = () => {
-      if (scanQueued) return;
-      scanQueued = true;
-      window.setTimeout(() => {
-        scanQueued = false;
-        if (!disposed) highlighter.scan();
-      }, 30);
-    };
+    // Decorated in passes, and not while output streams (highlightPacer).
+    // (Timers, not requestAnimationFrame: rAF doesn't run while the window
+    // is hidden, and highlights would lag behind output.)
+    const highlightScans = highlightPacer({
+      scan: () => { if (!disposed) highlighter.scan(); },
+      standAside: () => { if (!disposed) highlighter.standAside(); },
+      settle: () => { if (!disposed) highlighter.settle(); },
+    });
+    term.onLineFeed(() => highlightScans.lineFeed());
+    const scheduleHighlight = () => highlightScans.written();
     fitAddon.fit();
     // A freshly connected session needs keyboard focus immediately -- the
     // user is about to be looking at a host-key or password prompt and
@@ -487,7 +492,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     terminalManager.registerTerminal(tab.id, term, tab.syncChannel);
     terminalManager.setActiveTab(tab.id);
 
-    // IP addresses copy, URLs open (terminalLinks.ts).
+    // URLs open (terminalLinks.ts).
     registerLinks(term);
 
     // Set once this view unmounts. Unmounting (switching tabs, a split pane
@@ -529,7 +534,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const handleIncomingChunk = (chunk: Uint8Array, live = true) => {
       if (disposed) return;
       goLive();
-      if (chunk.length > 0) setWaitingSince(null);
+      if (chunk.length > 0 && waitingSinceRef.current !== null) setWaitingSince(null);
       term.write(chunk, () => {
         scheduleHighlight();
         if (live) acker.ack(chunk.length);
@@ -578,8 +583,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         if (promptKind) setDetectedPasswordPrompt(promptKind);
       } else if (status === 'live') {
         if (!reachedLiveRef.current && live) addEventLog(isLocalSession ? 'Shell ready' : 'Connected', 'success');
-        onUpdateTab(tab.id, { status: 'live' });
-        setDetectedPasswordPrompt(null);
+        onUpdateTab(tab.id, { status: 'live' }); // a no-op once it is (tabUpdate.ts)
+        if (detectedPromptRef.current !== null) setDetectedPasswordPrompt(null);
         reachedLiveRef.current = true;
         reconnectAttemptRef.current = 0; // back up: the next drop starts over
       } else if (promptKind) {
@@ -587,7 +592,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         // split across chunks): the vault offers its password.
         setDetectedPasswordPrompt(promptKind);
       }
-      if (answeredAutomatically) setDetectedPasswordPrompt(null);
+      if (answeredAutomatically && detectedPromptRef.current !== null) setDetectedPasswordPrompt(null);
     };
 
     // PuTTY Classic: Copy on select
@@ -924,6 +929,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       if (!isSessionClosed(tab.id)) void detachTerminalSession(tab.id);
       shellIntegration.dispose();
       disposed = true;
+      highlightScans.dispose();
       highlighter.dispose();
       highlighterRef.current = null;
       term.dispose();
