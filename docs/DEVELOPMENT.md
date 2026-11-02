@@ -168,6 +168,19 @@ start unless it is already set (`prepare_webkit_environment` in
 drawing for 650-800 ms about a second after the window opened, and the
 first keys typed showed late. Set the variable to `0` to keep the renderer.
 
+The terminal is drawn with xterm's WebGL renderer where there is a GPU (a
+render node on Linux; WebView2 without software WebGL) and Settings >
+Terminal > "Draw the terminal with the GPU" is on, by default on Windows and
+macOS; it is drawn with the DOM renderer otherwise, and after a lost WebGL
+context (`src/services/renderer.ts`). On Linux the DOM renderer is the
+default: there it scrolled a long serial paste more smoothly. The DOM
+renderer redraws the whole screen for every line that scrolls in, so there
+keyword highlighting stands aside while output streams and colours it once
+it settles (`highlightPacer` in `src/services/keywordHighlight.ts`). A
+WebGL terminal has no text in the page: the e2e helpers read the screen
+from xterm's buffer, and time drawing with `onRender`. CI tests the DOM
+renderer (Linux by default, Windows without a GPU).
+
 ### Command Line (GNS3 consoles)
 Thyrion opens console tabs from its launch arguments. A second launch hands
 them to the window that is already running (single instance) and exits.

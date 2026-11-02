@@ -2,8 +2,9 @@ import React from 'react';
 import { TERMINAL_FONTS } from '../../../themes/fonts';
 import { TERMINAL_FONT_MIN, TERMINAL_FONT_MAX } from '../../../services/terminalFontKeys';
 import { SCROLLBACK_CHOICES, DEFAULT_SCROLLBACK, setScrollback, useScrollback } from '../../../services/scrollback';
+import { setGpuRendering, useGpuRendering } from '../../../services/renderer';
 
-/** Settings > Terminal: the default font, cursor and scrollback. */
+/** Settings > Terminal: the default font, cursor, scrollback and renderer. */
 export const TerminalSettingsSection: React.FC<{
   fontFamily: string;
   onChangeFontFamily: (font: string) => void;
@@ -13,6 +14,7 @@ export const TerminalSettingsSection: React.FC<{
   onChangeCursorStyle: (style: 'block' | 'bar' | 'underline') => void;
 }> = ({ fontFamily, onChangeFontFamily, fontSize, onChangeFontSize, cursorStyle, onChangeCursorStyle }) => {
   const scrollback = useScrollback();
+  const gpuRendering = useGpuRendering();
   const knownFont = TERMINAL_FONTS.some(f => f.value === fontFamily);
 
   return (
@@ -98,6 +100,25 @@ export const TerminalSettingsSection: React.FC<{
         <p className="text-meta text-plinky-muted">
           Lines kept above the screen, for scrolling back and Copy All to Clipboard. More lines use more memory in every open tab.
         </p>
+      </div>
+
+      {/* Renderer (renderer.ts) */}
+      <div className="space-y-1">
+        <label className="flex items-start space-x-2 cursor-pointer">
+          <input
+            id="settings-gpu-rendering"
+            type="checkbox"
+            checked={gpuRendering}
+            onChange={(e) => setGpuRendering(e.target.checked)}
+            className="mt-0.5 rounded border-plinky-700 bg-plinky-900 text-sky-500 focus:ring-0 cursor-pointer"
+          />
+          <div className="select-none">
+            <span className="text-slate-200 font-medium block">Draw the terminal with the GPU</span>
+            <span className="text-meta text-plinky-muted block">
+              Keywords are coloured as long output and pastes arrive; off, or without a GPU, they're coloured once output pauses. On by default on Windows and macOS; on Linux the other way scrolls more smoothly. Turn it off if the terminal draws wrongly.
+            </span>
+          </div>
+        </label>
       </div>
     </>
   );

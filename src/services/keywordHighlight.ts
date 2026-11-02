@@ -257,7 +257,12 @@ export const SETTLE_MS = 600;
  * (a pasted config, a long show): highlighting stands aside until it
  * settles (KeywordHighlighter.standAside()).
  */
-export function highlightPacer(h: Pick<KeywordHighlighter, 'scan' | 'standAside' | 'settle'>) {
+export function highlightPacer(
+  h: Pick<KeywordHighlighter, 'scan' | 'standAside' | 'settle'>,
+  /** False while the terminal is drawn with WebGL, which draws highlights
+   *  cheaply (renderer.ts): they stay on as output streams. */
+  { asideWhileStreaming = () => true }: { asideWhileStreaming?: () => boolean } = {},
+) {
   let scanTimer: ReturnType<typeof setTimeout> | null = null;
   let firstPending: number | null = null;
   let settleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -285,7 +290,7 @@ export function highlightPacer(h: Pick<KeywordHighlighter, 'scan' | 'standAside'
     /** The terminal moved to a new line (xterm's onLineFeed). */
     lineFeed() {
       lines++;
-      if (streaming || lines < STREAM_LINES) return;
+      if (streaming || lines < STREAM_LINES || !asideWhileStreaming()) return;
       streaming = true;
       cancelScan();
       h.standAside();

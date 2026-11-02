@@ -112,3 +112,18 @@ describe('keyword highlighter on a real terminal', () => {
     expect(hl.count).toBe(80);
   });
 });
+
+describe('highlight pacing under WebGL', () => {
+  it('keeps highlighting while lines stream: WebGL draws it cheaply', () => {
+    vi.useFakeTimers();
+    const h = { scan: vi.fn(), standAside: vi.fn(), settle: vi.fn() };
+    const p = highlightPacer(h, { asideWhileStreaming: () => false });
+    for (let i = 0; i < 100; i++) {
+      p.written();
+      p.lineFeed();
+      vi.advanceTimersByTime(200);
+    }
+    expect(h.standAside).not.toHaveBeenCalled();
+    expect(h.scan.mock.calls.length).toBeGreaterThan(50);
+  });
+});

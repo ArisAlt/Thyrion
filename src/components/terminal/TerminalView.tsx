@@ -48,6 +48,7 @@ import { useBroadcastGlow, glowColor } from '../../services/broadcast';
 import { SESSION_SAVED_EVENT, SessionSavedDetail, SessionLook, sessionLookFrom, pasteLineDelayFrom } from '../../services/appEvents';
 import { useTerminalTheme, findTerminalTheme } from '../../themes/terminalThemes';
 import { useScrollback } from '../../services/scrollback';
+import { startGpuRenderer, useGpuRendering } from '../../services/renderer';
 import { newId } from '../../services/ids';
 import { VaultUnlockDialog } from '../vault/VaultUnlockDialog';
 import { HostKeyDialog, storedFingerprint } from './HostKeyDialog';
@@ -151,6 +152,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const scrollback = useScrollback();
   const scrollbackRef = useRef(scrollback);
   scrollbackRef.current = scrollback;
+  // Drawn with WebGL where there's a GPU (renderer.ts).
+  const gpuRendering = useGpuRendering();
+  const webglRef = useRef(false);
   const terminalThemeRef = useRef(terminalTheme);
   terminalThemeRef.current = terminalTheme;
   const isLocalSession = tab.sessionName === 'Local Shell' || (tab as any).isLocal === true;
@@ -452,6 +456,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     });
 
     term.open(containerRef.current);
+    // The e2e suite reads the screen from the buffer: a terminal drawn with
+    // WebGL has no text in the page.
+    if (term.element) (term.element as HTMLElement & { __xterm?: Terminal }).__xterm = term;
     // The size xterm itself uses, for anything outside that needs it exact
     // (the e2e suite compares it with the size the device was told; a
     // size worked out from pixel widths can be a column off).
@@ -468,14 +475,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const highlighter = new KeywordHighlighter(term, tab.activeHighlighting !== false);
     highlighterRef.current = highlighter;
     highlighter.setTheme(terminalThemeRef.current.theme, !!terminalThemeRef.current.light);
-    // Decorated in passes, and not while output streams (highlightPacer).
-    // (Timers, not requestAnimationFrame: rAF doesn't run while the window
-    // is hidden, and highlights would lag behind output.)
+    // Decorated in passes, and, drawn by the DOM, not while output streams
+    // (highlightPacer). (Timers, not requestAnimationFrame: rAF doesn't run
+    // while the window is hidden, and highlights would lag behind output.)
     const highlightScans = highlightPacer({
       scan: () => { if (!disposed) highlighter.scan(); },
       standAside: () => { if (!disposed) highlighter.standAside(); },
       settle: () => { if (!disposed) highlighter.settle(); },
-    });
+    }, { asideWhileStreaming: () => !webglRef.current });
     term.onLineFeed(() => highlightScans.lineFeed());
     const scheduleHighlight = () => highlightScans.written();
     fitAddon.fit();
@@ -528,6 +535,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const acker = createOutputAcker(tab.id);
     // The session is there: send what was typed while it wasn't, in order.
     const goLive = () => {
+      // A resize while nothing was live went nowhere (the WebGL renderer's
+      // refit, a split opened while connecting): give the session the size
+      // the terminal shows. Telnet passes it on, Cisco IOS wraps by it.
+      if (!isLivePtyRef.current && term.cols && term.rows) resizeTerminal(tab.id, term.cols, term.rows);
       isLivePtyRef.current = true;
       for (const keys of heldInputRef.current.splice(0)) writeTerminalInput(tab.id, keys);
     };
@@ -754,12 +765,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       .then((attachInfo) => {
         if (disposed) return;
         if (attachInfo) {
-          goLive();
           // A session started before this view (a console from GNS3, a
-          // background tab) began at 120x32. The resize observer fired
-          // before the attach, while nothing was live, so tell it the real
-          // size now: telnet passes it on, and Cisco IOS wraps by it.
-          if (term.cols && term.rows) resizeTerminal(tab.id, term.cols, term.rows);
+          // background tab) began at 120x32: goLive tells it the real size.
+          goLive();
           // A host-key prompt raised while this tab was in the background was
           // broadcast to no listener; the backend still blocks input for it,
           // so re-show the dialog or the session is stuck.
@@ -935,6 +943,24 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       term.dispose();
     };
   }, [tab.id, tab.sessionName, tab.hostname, tab.port, tab.username]);
+
+  // WebGL on or off (Settings > Terminal), on the terminal made above.
+  useEffect(() => {
+    const term = terminalRef.current;
+    if (!gpuRendering || !term) return;
+    const gpu = startGpuRenderer(term, (on) => {
+      webglRef.current = on;
+      // WebGL's cells are whole device pixels, the DOM's aren't: the same
+      // pane can hold a column or a row more or less.
+      try { fitAddonRef.current?.fit(); } catch { /* not laid out */ }
+      // Streaming highlights were taken off for the DOM; WebGL draws them.
+      if (on) highlighterRef.current?.settle();
+    });
+    return () => {
+      gpu.stop();
+      webglRef.current = false;
+    };
+  }, [gpuRendering, tab.id]);
 
   // Execute in-buffer search
   const performSearch = useCallback((direction: 'next' | 'prev' = 'next') => {

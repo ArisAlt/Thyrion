@@ -16,6 +16,9 @@ export function installHelpers() {
   // The xterm of the tab on screen. Every open tab keeps its terminal in the
   // page; the others are hidden.
   const activeXterm = () => [...document.querySelectorAll('.xterm')].find(visible) ?? null;
+  // Its Terminal (TerminalView sets it): drawn with WebGL, the screen has
+  // no text in the page to read.
+  const activeTerminal = () => activeXterm()?.__xterm ?? null;
 
   const KEYS = {
     Enter: [13, 'Enter'], Backspace: [8, 'Backspace'], Tab: [9, 'Tab'], Escape: [27, 'Escape'],
@@ -78,10 +81,28 @@ export function installHelpers() {
     /** Text of the terminal on screen, one string per row, trailing
      *  spaces removed. Rows scrolled off the top are not included. */
     screen() {
+      const t = activeTerminal();
+      if (t) {
+        const buf = t.buffer.active;
+        const rows = [];
+        for (let y = buf.viewportY; y < buf.viewportY + t.rows; y++) {
+          rows.push((buf.getLine(y)?.translateToString(true) ?? '').replace(/\s+$/, ''));
+        }
+        return rows;
+      }
       const term = activeXterm();
       if (!term) return null;
       return [...term.querySelectorAll('.xterm-rows > div')]
         .map((row) => row.textContent.replace(/\u00a0/g, ' ').replace(/\s+$/, ''));
+    },
+
+    /** The Terminal on screen, for what only xterm knows (onRender). */
+    xterm: activeTerminal,
+
+    /** Whether the terminal on screen is drawn with WebGL. */
+    webgl() {
+      const term = activeXterm();
+      return !!term && !term.querySelector('.xterm-rows');
     },
 
     /** Columns and rows the terminal on screen shows. */
@@ -174,8 +195,8 @@ export function installHelpers() {
       const term = activeXterm();
       const screenEl = term.querySelector('.xterm-screen');
       const box = screenEl.getBoundingClientRect();
-      const rows = term.querySelectorAll('.xterm-rows > div').length;
       const size = e2e.termSize();
+      const rows = size.rows;
       const cw = box.width / size.cols, ch = box.height / rows;
       const at = (x, r) => ({ clientX: box.left + x * cw, clientY: box.top + (r + 0.5) * ch });
       const opts = { bubbles: true, cancelable: true, view: window, button: 0 };
