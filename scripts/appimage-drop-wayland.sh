@@ -26,9 +26,17 @@ if [ "$removed" -eq 0 ]; then
   exit 0
 fi
 
+# Readable by everyone. The bundle has folders only their owner can open
+# (mode 0700: the extracted root, usr/share/doc/*, apprun-hooks);
+# appimagetool (continuous, 2026-11-01) refused to pack them, and the v0.2.15
+# release failed.
+chmod -R a+rX squashfs-root
+
+# A fixed appimagetool, checked: "continuous" changes under us.
 tool="$work/appimagetool"
 curl -fsSL -o "$tool" \
-  https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+  https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  $tool" | sha256sum -c --quiet
 chmod +x "$tool"
 ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$tool" --no-appstream squashfs-root "$work/out.AppImage" >/dev/null
 mv "$work/out.AppImage" "$appimage"
