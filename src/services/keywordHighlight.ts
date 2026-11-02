@@ -67,6 +67,8 @@ export function findHighlights(text: string, rules: HighlightRule[] = NETWORK_RU
 
 /** Lines scanned at most per pass, so a huge burst of output can't stall the UI. */
 const MAX_LINES_PER_SCAN = 500;
+/** Lines scanned at most once output settles after streaming (settle()). */
+const SETTLE_SCAN_LINES = 2000;
 /** Decorations kept before trimming the ones whose lines left the scrollback. */
 const PRUNE_AT = 5000;
 
@@ -78,8 +80,13 @@ const PRUNE_AT = 5000;
  */
 export class KeywordHighlighter {
   private items: { marker: IMarker; deco: IDisposable }[] = [];
-  private nextLine = 0;
+  /** The first line not scanned yet. A marker, not a line number: once the
+   *  scrollback is full, line numbers stop growing (the top lines go), and
+   *  a number kept here said every new line was already scanned. */
+  private next: IMarker | null = null;
   private enabled: boolean;
+  /** Output is streaming: nothing new is decorated (standAside()). */
+  private aside = false;
 
   /** Rule colour -> the scheme's own colour for it. The rules name fixed
    *  colours; drawn as they are, amber #fbbf24 and cyan #22d3ee were
@@ -106,8 +113,7 @@ export class KeywordHighlighter {
     // white terminal): redraw what is on screen.
     if (this.enabled && this.items.length > 0) {
       this.clear();
-      const buf = this.term.buffer.active;
-      this.nextLine = Math.max(0, buf.baseY + buf.cursorY - MAX_LINES_PER_SCAN);
+      this.rewind();
       this.scan();
     }
   }
@@ -125,8 +131,7 @@ export class KeywordHighlighter {
     this.enabled = on;
     if (on) {
       // Pick up what's on screen now, not only what arrives next.
-      const buf = this.term.buffer.active;
-      this.nextLine = Math.max(0, buf.baseY + buf.cursorY - MAX_LINES_PER_SCAN);
+      this.rewind();
       this.scan();
     } else {
       this.clear();
@@ -141,14 +146,37 @@ export class KeywordHighlighter {
     this.items = [];
   }
 
-  /** Decorate every finished line not seen yet. Call after output is written. */
-  scan() {
+  private cursorLine(): number {
     const buf = this.term.buffer.active;
-    if (!this.enabled || buf.type !== 'normal') return;
-    const cursorLine = buf.baseY + buf.cursorY;
-    // Scrollback trimmed or cleared under us: start from what's there.
-    if (this.nextLine > cursorLine) this.nextLine = cursorLine;
-    const from = Math.max(this.nextLine, cursorLine - MAX_LINES_PER_SCAN);
+    return buf.baseY + buf.cursorY;
+  }
+
+  /** The next scan starts at this line. */
+  private resumeAt(line: number) {
+    this.next?.dispose();
+    this.next = this.term.registerMarker(line - this.cursorLine()) ?? null;
+  }
+
+  /** Where the next scan starts: the marker's line, or, with no marker (or
+   *  its line gone from the scrollback), as far back as one scan reaches. */
+  private resumeLine(cursorLine: number): number {
+    if (this.next && !this.next.isDisposed && this.next.line >= 0) return this.next.line;
+    return Math.max(0, cursorLine - MAX_LINES_PER_SCAN);
+  }
+
+  /** Scan back over what is on screen now, as a first scan would. */
+  private rewind() {
+    this.next?.dispose();
+    this.next = null;
+  }
+
+  /** Decorate every finished line not seen yet. Call after output is written. */
+  scan(maxLines = MAX_LINES_PER_SCAN) {
+    const buf = this.term.buffer.active;
+    if (!this.enabled || this.aside || buf.type !== 'normal') return;
+    const cursorLine = this.cursorLine();
+    // Cleared under us (a marker can't be past the cursor otherwise).
+    const from = Math.max(Math.min(this.resumeLine(cursorLine), cursorLine), cursorLine - maxLines);
     for (let y = from; y < cursorLine; y++) {
       const line = buf.getLine(y);
       if (!line) continue;
@@ -168,11 +196,121 @@ export class KeywordHighlighter {
         else marker.dispose();
       }
     }
-    this.nextLine = cursorLine;
+    this.resumeAt(cursorLine);
     if (this.items.length > PRUNE_AT) this.items = this.items.filter(i => !i.marker.isDisposed);
+  }
+
+  /**
+   * Output is streaming: take the highlights off the screen and add none
+   * until settle(). xterm (DOM renderer, 5.5) redraws the whole screen for
+   * every line that scrolls in, and draws each decorated character as a
+   * <span> of its own: with a config's addresses and interfaces coloured, a
+   * 300-line paste on a serial console (C891F) took 40-120 ms a frame and
+   * stood still for 100 ms and more. Plain, it drew line by line, as
+   * SecureCRT does. Highlights above the screen stay: they cost nothing.
+   */
+  standAside() {
+    const buf = this.term.buffer.active;
+    // A full-screen program's output: it has no highlights to take off.
+    if (this.aside || buf.type !== 'normal') return;
+    this.aside = true;
+    const top = buf.viewportY;
+    let first = Infinity;
+    this.items = this.items.filter(i => {
+      const line = i.marker.line;
+      if (line < top) return !i.marker.isDisposed;
+      first = Math.min(first, line);
+      i.deco.dispose();
+      i.marker.dispose();
+      return false;
+    });
+    if (first < this.resumeLine(this.cursorLine())) this.resumeAt(first);
+  }
+
+  /** Output has settled: decorate what arrived while it streamed. */
+  settle() {
+    if (!this.aside) return;
+    this.aside = false;
+    this.scan(SETTLE_SCAN_LINES);
   }
 
   dispose() {
     this.clear();
+    this.next?.dispose();
+    this.next = null;
   }
+}
+
+/** Quiet after output before a scan, and the longest output waits for one. */
+export const SCAN_QUIET_MS = 150;
+export const SCAN_MAX_WAIT_MS = 1000;
+/** Lines in one go (no pause of SETTLE_MS) that make output a stream. */
+export const STREAM_LINES = 24;
+/** Quiet that ends a stream. Longer than a serial console's pause between
+ *  the lines of a pasted config (0.1-0.2 s on a C891F at 9600). */
+export const SETTLE_MS = 600;
+
+/**
+ * When to decorate. Output arrives in many small chunks: scan them in one
+ * pass once output pauses, and at least once a second while it doesn't.
+ * Once a screenful of lines has come without a pause, the output streams
+ * (a pasted config, a long show): highlighting stands aside until it
+ * settles (KeywordHighlighter.standAside()).
+ */
+export function highlightPacer(
+  h: Pick<KeywordHighlighter, 'scan' | 'standAside' | 'settle'>,
+  /** False while the terminal is drawn with WebGL, which draws highlights
+   *  cheaply (renderer.ts): they stay on as output streams. */
+  { asideWhileStreaming = () => true }: { asideWhileStreaming?: () => boolean } = {},
+) {
+  let scanTimer: ReturnType<typeof setTimeout> | null = null;
+  let firstPending: number | null = null;
+  let settleTimer: ReturnType<typeof setTimeout> | null = null;
+  let lines = 0;
+  let streaming = false;
+  // setTimeout and clearTimeout are called plainly: as methods of another
+  // object, WebKit refuses them ("Illegal invocation").
+  const cancelScan = () => {
+    if (scanTimer !== null) clearTimeout(scanTimer);
+    scanTimer = null;
+    firstPending = null;
+  };
+  const requestScan = () => {
+    const now = Date.now();
+    if (firstPending === null) firstPending = now;
+    if (scanTimer !== null) clearTimeout(scanTimer);
+    const due = Math.min(now + SCAN_QUIET_MS, firstPending + SCAN_MAX_WAIT_MS);
+    scanTimer = setTimeout(() => {
+      scanTimer = null;
+      firstPending = null;
+      h.scan();
+    }, Math.max(0, due - now));
+  };
+  return {
+    /** The terminal moved to a new line (xterm's onLineFeed). */
+    lineFeed() {
+      lines++;
+      if (streaming || lines < STREAM_LINES || !asideWhileStreaming()) return;
+      streaming = true;
+      cancelScan();
+      h.standAside();
+    },
+    /** Output was written. */
+    written() {
+      if (!streaming) requestScan();
+      if (settleTimer !== null) clearTimeout(settleTimer);
+      settleTimer = setTimeout(() => {
+        settleTimer = null;
+        lines = 0;
+        if (!streaming) return;
+        streaming = false;
+        h.settle();
+      }, SETTLE_MS);
+    },
+    dispose() {
+      cancelScan();
+      if (settleTimer !== null) clearTimeout(settleTimer);
+      settleTimer = null;
+    },
+  };
 }

@@ -57,18 +57,19 @@ export const tests = [
     // key to the line, the echo to the page, the page to the screen. On a
     // real Cisco console at 9600 baud the echo itself takes 7-14 ms.
     const took = await app.run(async (e) => {
-      const rows = [...document.querySelectorAll('.xterm')].find(e.visible).querySelector('.xterm-rows');
+      // Drawn: the first frame xterm renders (DOM or WebGL) that shows it.
+      const t = e.xterm();
+      const text = () => e.screen().join('\n');
       const times = [];
       for (const ch of 'abcdefghij') {
         times.push(await new Promise((resolve) => {
-          const before = rows.textContent;
+          const before = text();
           const t0 = performance.now();
-          const mo = new MutationObserver(() => {
-            if (rows.textContent !== before) { mo.disconnect(); resolve(performance.now() - t0); }
+          const sub = t.onRender(() => {
+            if (text() !== before) { sub.dispose(); resolve(performance.now() - t0); }
           });
-          mo.observe(rows, { subtree: true, childList: true, characterData: true });
           e.type(ch);
-          setTimeout(() => { mo.disconnect(); resolve(Infinity); }, 2000);
+          setTimeout(() => { sub.dispose(); resolve(Infinity); }, 2000);
         }));
       }
       for (let i = 0; i < 10; i++) e.key('Backspace');

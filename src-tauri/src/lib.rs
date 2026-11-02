@@ -84,6 +84,17 @@ pub fn prepare_webkit_environment() {
     }
 }
 
+/// Whether the terminal may draw with WebGL (renderer.ts): on Linux only
+/// with a GPU render node, since without one WebGL is drawn in software,
+/// slower than xterm's DOM renderer. WebView2 and WKWebView have a GPU.
+#[tauri::command]
+fn gpu_available() -> bool {
+    #[cfg(target_os = "linux")]
+    return has_gpu_render_node(std::path::Path::new("/dev/dri"));
+    #[cfg(not(target_os = "linux"))]
+    return true;
+}
+
 /// Whether `dri` holds a GPU render node (`renderD128` and on).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn has_gpu_render_node(dri: &std::path::Path) -> bool {
@@ -218,6 +229,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             take_open_requests,
+            gpu_available,
             is_session_connected,
             is_session_ended,
             set_session_locked,

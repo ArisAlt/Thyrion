@@ -95,7 +95,7 @@ export const tests = [
       if (tabEl.dataset.tabActive !== 'true') e.click(tabEl);
       const x = [...document.querySelectorAll('.xterm')].find(e.visible);
       return { bg: getComputedStyle(x.querySelector('.xterm-viewport')).backgroundColor,
-               size: getComputedStyle(x.querySelector('.xterm-rows')).fontSize };
+               size: `${e.xterm().options.fontSize}px` };
     });
     const pick = (id, value) => app.run((e, i, v) => {
       const sel = document.getElementById(i);

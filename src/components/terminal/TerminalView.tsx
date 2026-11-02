@@ -42,12 +42,13 @@ import {
 import {
   classifyPasswordPrompt, appendRecentOutput, trackTypedInput, isCommandSubmission,
 } from '../../services/promptDetect';
-import { KeywordHighlighter } from '../../services/keywordHighlight';
+import { KeywordHighlighter, highlightPacer } from '../../services/keywordHighlight';
 import { shouldTakeHoverFocus } from '../../services/hoverFocus';
 import { useBroadcastGlow, glowColor } from '../../services/broadcast';
 import { SESSION_SAVED_EVENT, SessionSavedDetail, SessionLook, sessionLookFrom, pasteLineDelayFrom } from '../../services/appEvents';
 import { useTerminalTheme, findTerminalTheme } from '../../themes/terminalThemes';
 import { useScrollback } from '../../services/scrollback';
+import { startGpuRenderer, useGpuRendering } from '../../services/renderer';
 import { newId } from '../../services/ids';
 import { VaultUnlockDialog } from '../vault/VaultUnlockDialog';
 import { HostKeyDialog, storedFingerprint } from './HostKeyDialog';
@@ -151,6 +152,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const scrollback = useScrollback();
   const scrollbackRef = useRef(scrollback);
   scrollbackRef.current = scrollback;
+  // Drawn with WebGL where there's a GPU (renderer.ts).
+  const gpuRendering = useGpuRendering();
+  const webglRef = useRef(false);
   const terminalThemeRef = useRef(terminalTheme);
   terminalThemeRef.current = terminalTheme;
   const isLocalSession = tab.sessionName === 'Local Shell' || (tab as any).isLocal === true;
@@ -262,6 +266,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   // host printed nothing for 35 s or more: a black terminal under a green
   // dot and a green "Terminal ready", which read as connected but hung.
   const [waitingSince, setWaitingSince] = useState<number | null>(null);
+  // The two above as they are now, for the output handler: it runs on every
+  // chunk (each byte, on a 9600-baud console), and setting state it already
+  // has still cost React a render each time.
+  const waitingSinceRef = useRef(waitingSince);
+  waitingSinceRef.current = waitingSince;
+  const detectedPromptRef = useRef(detectedPasswordPrompt);
+  detectedPromptRef.current = detectedPasswordPrompt;
   const [, setWaitTick] = useState(0);
   useEffect(() => {
     if (waitingSince === null) return;
@@ -445,6 +456,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     });
 
     term.open(containerRef.current);
+    // The e2e suite reads the screen from the buffer: a terminal drawn with
+    // WebGL has no text in the page.
+    if (term.element) (term.element as HTMLElement & { __xterm?: Terminal }).__xterm = term;
     // The size xterm itself uses, for anything outside that needs it exact
     // (the e2e suite compares it with the size the device was told; a
     // size worked out from pixel widths can be a column off).
@@ -461,18 +475,16 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const highlighter = new KeywordHighlighter(term, tab.activeHighlighting !== false);
     highlighterRef.current = highlighter;
     highlighter.setTheme(terminalThemeRef.current.theme, !!terminalThemeRef.current.light);
-    // Output arrives in many small chunks; decorate them in one pass a few
-    // ms later. (setTimeout, not requestAnimationFrame: rAF doesn't run
+    // Decorated in passes, and, drawn by the DOM, not while output streams
+    // (highlightPacer). (Timers, not requestAnimationFrame: rAF doesn't run
     // while the window is hidden, and highlights would lag behind output.)
-    let scanQueued = false;
-    const scheduleHighlight = () => {
-      if (scanQueued) return;
-      scanQueued = true;
-      window.setTimeout(() => {
-        scanQueued = false;
-        if (!disposed) highlighter.scan();
-      }, 30);
-    };
+    const highlightScans = highlightPacer({
+      scan: () => { if (!disposed) highlighter.scan(); },
+      standAside: () => { if (!disposed) highlighter.standAside(); },
+      settle: () => { if (!disposed) highlighter.settle(); },
+    }, { asideWhileStreaming: () => !webglRef.current });
+    term.onLineFeed(() => highlightScans.lineFeed());
+    const scheduleHighlight = () => highlightScans.written();
     fitAddon.fit();
     // A freshly connected session needs keyboard focus immediately -- the
     // user is about to be looking at a host-key or password prompt and
@@ -487,7 +499,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     terminalManager.registerTerminal(tab.id, term, tab.syncChannel);
     terminalManager.setActiveTab(tab.id);
 
-    // IP addresses copy, URLs open (terminalLinks.ts).
+    // URLs open (terminalLinks.ts).
     registerLinks(term);
 
     // Set once this view unmounts. Unmounting (switching tabs, a split pane
@@ -523,13 +535,24 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const acker = createOutputAcker(tab.id);
     // The session is there: send what was typed while it wasn't, in order.
     const goLive = () => {
+      // A resize while nothing was live went nowhere (the WebGL renderer's
+      // refit, a split opened while connecting): give the session the size
+      // the terminal shows. Telnet passes it on, Cisco IOS wraps by it.
+      if (!isLivePtyRef.current && term.cols && term.rows) resizeTerminal(tab.id, term.cols, term.rows);
       isLivePtyRef.current = true;
       for (const keys of heldInputRef.current.splice(0)) writeTerminalInput(tab.id, keys);
+    };
+    // The ref follows at once, not at the next render: a prompt shown and
+    // answered automatically in the same chunk was left on screen, and its
+    // Send Password sent the secret a second time.
+    const showPrompt = (kind: typeof detectedPromptRef.current) => {
+      detectedPromptRef.current = kind;
+      setDetectedPasswordPrompt(kind);
     };
     const handleIncomingChunk = (chunk: Uint8Array, live = true) => {
       if (disposed) return;
       goLive();
-      if (chunk.length > 0) setWaitingSince(null);
+      if (chunk.length > 0 && waitingSinceRef.current !== null) setWaitingSince(null);
       term.write(chunk, () => {
         scheduleHighlight();
         if (live) acker.ack(chunk.length);
@@ -559,7 +582,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       if (status === 'ended') {
         endedRef.current = true;
         onUpdateTab(tab.id, { status: 'disconnected' });
-        setDetectedPasswordPrompt(null);
+        showPrompt(null);
         // A FATAL ERROR after the session was live is a dropped connection
         // ("Remote side unexpectedly closed", "Network error: ..."). A clean
         // `exit` prints no FATAL, and a failed login never reached live --
@@ -575,19 +598,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       } else if (status === 'preauth') {
         // The prompt is noticed as well, for the vault's offer.
         onUpdateTab(tab.id, { status: 'preauth' });
-        if (promptKind) setDetectedPasswordPrompt(promptKind);
+        if (promptKind) showPrompt(promptKind);
       } else if (status === 'live') {
         if (!reachedLiveRef.current && live) addEventLog(isLocalSession ? 'Shell ready' : 'Connected', 'success');
-        onUpdateTab(tab.id, { status: 'live' });
-        setDetectedPasswordPrompt(null);
+        onUpdateTab(tab.id, { status: 'live' }); // a no-op once it is (tabUpdate.ts)
+        if (detectedPromptRef.current !== null) showPrompt(null);
         reachedLiveRef.current = true;
         reconnectAttemptRef.current = 0; // back up: the next drop starts over
       } else if (promptKind) {
         // A prompt the status stays the same for (a router's enable, one
         // split across chunks): the vault offers its password.
-        setDetectedPasswordPrompt(promptKind);
+        showPrompt(promptKind);
       }
-      if (answeredAutomatically) setDetectedPasswordPrompt(null);
+      if (answeredAutomatically && detectedPromptRef.current !== null) showPrompt(null);
     };
 
     // PuTTY Classic: Copy on select
@@ -749,12 +772,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       .then((attachInfo) => {
         if (disposed) return;
         if (attachInfo) {
-          goLive();
           // A session started before this view (a console from GNS3, a
-          // background tab) began at 120x32. The resize observer fired
-          // before the attach, while nothing was live, so tell it the real
-          // size now: telnet passes it on, and Cisco IOS wraps by it.
-          if (term.cols && term.rows) resizeTerminal(tab.id, term.cols, term.rows);
+          // background tab) began at 120x32: goLive tells it the real size.
+          goLive();
           // A host-key prompt raised while this tab was in the background was
           // broadcast to no listener; the backend still blocks input for it,
           // so re-show the dialog or the session is stuck.
@@ -924,11 +944,30 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       if (!isSessionClosed(tab.id)) void detachTerminalSession(tab.id);
       shellIntegration.dispose();
       disposed = true;
+      highlightScans.dispose();
       highlighter.dispose();
       highlighterRef.current = null;
       term.dispose();
     };
   }, [tab.id, tab.sessionName, tab.hostname, tab.port, tab.username]);
+
+  // WebGL on or off (Settings > Terminal), on the terminal made above.
+  useEffect(() => {
+    const term = terminalRef.current;
+    if (!gpuRendering || !term) return;
+    const gpu = startGpuRenderer(term, (on) => {
+      webglRef.current = on;
+      // WebGL's cells are whole device pixels, the DOM's aren't: the same
+      // pane can hold a column or a row more or less.
+      try { fitAddonRef.current?.fit(); } catch { /* not laid out */ }
+      // Streaming highlights were taken off for the DOM; WebGL draws them.
+      if (on) highlighterRef.current?.settle();
+    });
+    return () => {
+      gpu.stop();
+      webglRef.current = false;
+    };
+  }, [gpuRendering, tab.id]);
 
   // Execute in-buffer search
   const performSearch = useCallback((direction: 'next' | 'prev' = 'next') => {
