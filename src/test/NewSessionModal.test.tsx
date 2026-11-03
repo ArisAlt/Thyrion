@@ -606,6 +606,42 @@ describe('NewSessionModal Component', () => {
     render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={vi.fn()} editingSession={serial} />);
     expect(screen.queryByLabelText('Keepalive interval in seconds')).toBeNull();
   });
+
+  it('saves X11 forwarding under the keys PuTTY reads', async () => {
+    const onSave = vi.fn();
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} />);
+    fireEvent.change(screen.getByLabelText(/^Session name$/i), { target: { value: 'Lab' } });
+    fireEvent.change(screen.getByPlaceholderText(/192\.0\.2\.10/i), { target: { value: '10.0.0.5' } });
+    expect(screen.queryByLabelText('X display location')).toBeNull();
+    fireEvent.click(screen.getByLabelText(/Enable X11 forwarding/i));
+    fireEvent.change(screen.getByLabelText('X display location'), { target: { value: ' localhost:0 ' } });
+    fireEvent.click(screen.getByRole('button', { name: /^save session$/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave.mock.calls[0][0].extra).toMatchObject({ X11Forward: '1', X11Display: 'localhost:0' });
+  });
+
+  it('shows a PuTTY session with X11 on, and turning it off keeps it off', async () => {
+    const onSave = vi.fn();
+    const putty = { name: 'Gfx', hostname: 'h', port: 22, protocol: 'SSH' as const, extra: { X11Forward: '1', X11Display: ':1' } };
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} editingSession={putty} />);
+    const box = screen.getByLabelText(/Enable X11 forwarding/i) as HTMLInputElement;
+    expect(box.checked).toBe(true);
+    expect((screen.getByLabelText('X display location') as HTMLInputElement).value).toBe(':1');
+    fireEvent.click(box);
+    fireEvent.click(screen.getByRole('button', { name: /^save changes$/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave.mock.calls[0][0].extra.X11Forward).toBe('0');
+  });
+
+  it('offers X11 forwarding only for SSH and leaves the keys alone otherwise', async () => {
+    const onSave = vi.fn();
+    const telnet = { name: 'Con', hostname: 'h', port: 23, protocol: 'Telnet' as const, extra: { X11Forward: '1' } };
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} editingSession={telnet} />);
+    expect(screen.queryByLabelText(/Enable X11 forwarding/i)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /^save changes$/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave.mock.calls[0][0].extra.X11Forward).toBe('1');
+  });
 });
 
 describe('the session editor tabs (T-014)', () => {

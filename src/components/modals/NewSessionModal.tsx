@@ -103,6 +103,9 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
   const [keepalive, setKeepalive] = useState('');
   const [tcpKeepalives, setTcpKeepalives] = useState(false);
   const [autoReconnect, setAutoReconnect] = useState(false);
+  // X11 forwarding (SSH): PuTTY's X11Forward and X11Display, which -load applies.
+  const [x11Forward, setX11Forward] = useState(false);
+  const [x11Display, setX11Display] = useState('');
   // SecureCRT-style logon actions and a tab colour (tabColors.ts).
   const [logonActions, setLogonActions] = useState<LogonAction[]>([]);
   const [tabColor, setTabColor] = useState('');
@@ -241,6 +244,8 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
       setKeepalive(ka ? String(ka) : '');
       setTcpKeepalives(extra.TCPKeepalives === '1');
       setAutoReconnect(extra.PlinkyAutoReconnect === '1');
+      setX11Forward(extra.X11Forward === '1');
+      setX11Display(extra.X11Display || '');
       setLogonActions(parseLogonActions(extra.PlinkyLogonActions));
       setTabColor(extra.PlinkyTabColor || '');
       setLookScheme(extra.PlinkyColourScheme || '');
@@ -291,6 +296,8 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
       setKeepalive('');
       setTcpKeepalives(false);
       setAutoReconnect(false);
+      setX11Forward(false);
+      setX11Display('');
     }
   }, [isOpen, editingSession, initialFolder]);
 
@@ -587,6 +594,10 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
       Object.assign(extra, keepaliveKeys(parseInt(keepalive, 10) || 0));
       extra.TCPKeepalives = tcpKeepalives ? '1' : '0';
     }
+    if (protocol === 'SSH') {
+      extra.X11Forward = x11Forward ? '1' : '0';
+      if (x11Display.trim()) extra.X11Display = x11Display.trim(); else delete extra.X11Display;
+    }
     const autoReconnectOn = autoReconnect && !isSerial;
     if (autoReconnectOn) extra.PlinkyAutoReconnect = '1'; else delete extra.PlinkyAutoReconnect;
     const logon = serializeLogonActions(logonActions);
@@ -641,7 +652,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
     ...(protocol === 'SSH' ? [{ id: 'jump' as const, label: 'Jump Host', on: enableJumpHost }] : []),
     ...(isSerial ? [{ id: 'serial' as const, label: 'Serial' }] : []),
     { id: 'appearance', label: 'Appearance', on: !!(lookScheme || lookFont || lookSize) },
-    { id: 'advanced', label: 'Advanced', on: (!isSerial && (parseInt(keepalive, 10) > 0 || autoReconnect)) || parseInt(pasteDelay, 10) > 0 || autoLog !== 'global' || logonActions.some(a => a.send.trim()) },
+    { id: 'advanced', label: 'Advanced', on: (!isSerial && (parseInt(keepalive, 10) > 0 || autoReconnect)) || (protocol === 'SSH' && x11Forward) || parseInt(pasteDelay, 10) > 0 || autoLog !== 'global' || logonActions.some(a => a.send.trim()) },
   ];
   // Switching protocol can take away the tab that was open (Jump Host).
   const tab: SessionTab = visibleTabs.some(t => t.id === pickedTab) ? pickedTab : 'general';
@@ -762,8 +773,8 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
             <div data-tab="advanced" hidden={tab !== 'advanced'} className="space-y-3">
               <AdvancedTab {...{
                 protocol, name, hostname, folder, keepalive, setKeepalive, tcpKeepalives, setTcpKeepalives,
-                autoReconnect, setAutoReconnect, autoLog, setAutoLog, pasteDelay, setPasteDelay, logonActions,
-                setLogonActions
+                autoReconnect, setAutoReconnect, x11Forward, setX11Forward, x11Display, setX11Display,
+                autoLog, setAutoLog, pasteDelay, setPasteDelay, logonActions, setLogonActions
               }} />
             </div>
 

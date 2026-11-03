@@ -6,8 +6,8 @@ import { LOGON_PRESETS, withPreset } from '../../../services/logonPresets';
 import { MAX_PASTE_LINE_DELAY_MS } from '../../../services/appEvents';
 import { Setter, AutoLog } from './types';
 
-/** Session settings > Advanced: keepalives and reconnecting, logging, the
- *  paste line delay and logon actions. */
+/** Session settings > Advanced: keepalives and reconnecting, X11 forwarding,
+ *  logging, the paste line delay and logon actions. */
 export const AdvancedTab: React.FC<{
   protocol: Protocol;
   name: string;
@@ -19,6 +19,10 @@ export const AdvancedTab: React.FC<{
   setTcpKeepalives: Setter<boolean>;
   autoReconnect: boolean;
   setAutoReconnect: Setter<boolean>;
+  x11Forward: boolean;
+  setX11Forward: Setter<boolean>;
+  x11Display: string;
+  setX11Display: Setter<string>;
   autoLog: AutoLog;
   setAutoLog: Setter<AutoLog>;
   pasteDelay: string;
@@ -27,8 +31,8 @@ export const AdvancedTab: React.FC<{
   setLogonActions: Setter<LogonAction[]>;
 }> = ({
   protocol, name, hostname, folder, keepalive, setKeepalive, tcpKeepalives, setTcpKeepalives,
-  autoReconnect, setAutoReconnect, autoLog, setAutoLog, pasteDelay, setPasteDelay,
-  logonActions, setLogonActions,
+  autoReconnect, setAutoReconnect, x11Forward, setX11Forward, x11Display, setX11Display,
+  autoLog, setAutoLog, pasteDelay, setPasteDelay, logonActions, setLogonActions,
 }) => {
   const isSerial = protocol === 'Serial';
 
@@ -65,6 +69,34 @@ export const AdvancedTab: React.FC<{
               <span className="block text-plinky-muted">Not after you type exit or a login fails. Tries 5 times, waiting longer each time.</span>
             </span>
           </label>
+        </div>
+      )}
+
+      {/* X11 forwarding: PuTTY's own keys, applied by plink -load */}
+      {protocol === 'SSH' && (
+        <div className="p-2.5 bg-plinky-950/70 border border-plinky-800 rounded-md space-y-1.5 text-meta">
+          <label className="flex items-start space-x-2 cursor-pointer">
+            <input type="checkbox" checked={x11Forward} onChange={e => setX11Forward(e.target.checked)} className="mt-0.5" />
+            <span className="text-slate-300">
+              Enable X11 forwarding
+              <span className="block text-plinky-muted">
+                Graphical programs started on the server open on this screen. Windows needs an X server running,
+                such as VcXsrv or Xming.
+              </span>
+            </span>
+          </label>
+          {x11Forward && (
+            <label className="flex items-center justify-between space-x-2">
+              <span className="text-slate-300">X display location</span>
+              <input
+                value={x11Display}
+                onChange={e => setX11Display(e.target.value)}
+                placeholder="default"
+                aria-label="X display location"
+                className="w-40 bg-plinky-900 border border-plinky-700 rounded px-2 py-0.5 text-slate-100 text-xs font-mono focus:outline-none focus:border-sky-500"
+              />
+            </label>
+          )}
         </div>
       )}
 
