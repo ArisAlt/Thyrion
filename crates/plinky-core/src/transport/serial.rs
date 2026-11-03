@@ -209,11 +209,30 @@ impl SerialTransport {
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
             while alive_reader.load(Ordering::Relaxed) {
-                match reader.read(&mut buf, &alive_reader) {
+                // One byte, as PuTTY reads (HANDLE_FLAG_UNITBUFFER in
+                // windows/serial.c), then whatever the driver holds already.
+                // A 4 KB read relied on the 1 ms interval timeout, and Cisco's
+                // USB console driver (the mini-USB port on a 3850) doesn't
+                // keep it: the read came back only once 4 KB had arrived. A
+                // paste showed a screenful at a time, and its echo pacing,
+                // never seeing a line's echo, sent each line on its timeout.
+                match reader.read(&mut buf[..1], &alive_reader) {
                     // Nothing, or a read cancelled by a kill: the loop
                     // decides. Never a hangup on Windows (that's an error).
                     Ok(0) => std::thread::sleep(Duration::from_millis(1)),
-                    Ok(n) => {
+                    Ok(_) => {
+                        let mut n = 1;
+                        let queued = reader.queued().min(buf.len() - 1);
+                        if queued > 0 {
+                            match reader.read(&mut buf[1..1 + queued], &alive_reader) {
+                                Ok(more) => n += more,
+                                Err(e) if win::was_cancelled(&e) => {}
+                                Err(_) => {
+                                    let _ = out_tx.send(buf[..n].to_vec());
+                                    break;
+                                }
+                            }
+                        }
                         if out_tx.send(buf[..n].to_vec()).is_err() {
                             break;
                         }
@@ -460,7 +479,8 @@ mod win {
 
     use serialport::{DataBits, FlowControl, Parity, StopBits};
     use windows_sys::Win32::Devices::Communication::{
-        ClearCommBreak, GetCommState, SetCommBreak, SetCommState, SetCommTimeouts, COMMTIMEOUTS, DCB,
+        ClearCommBreak, ClearCommError, GetCommState, SetCommBreak, SetCommState, SetCommTimeouts, COMMTIMEOUTS,
+        COMSTAT, DCB,
     };
     use windows_sys::Win32::Foundation::{
         CloseHandle, GetLastError, ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, GENERIC_READ, GENERIC_WRITE,
@@ -624,6 +644,17 @@ mod win {
             let len = buf.len().min(u32::MAX as usize) as u32;
             let ptr = buf.as_mut_ptr();
             self.overlapped(alive, |ov| unsafe { ReadFile(self.handle, ptr, len, ptr::null_mut(), ov) })
+        }
+
+        /// Bytes received and not read yet. 0 where the handle can't say (a
+        /// pipe standing in for a COM port): reads then go a byte at a time.
+        pub fn queued(&self) -> usize {
+            let mut errors = 0u32;
+            let mut stat: COMSTAT = unsafe { std::mem::zeroed() };
+            if unsafe { ClearCommError(self.handle, &mut errors, &mut stat) } == 0 {
+                return 0;
+            }
+            stat.cbInQue as usize
         }
 
         /// Writes some of `buf`; waits as long as the device holds the line
