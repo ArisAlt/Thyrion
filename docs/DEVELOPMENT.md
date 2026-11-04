@@ -214,6 +214,8 @@ A release is a `release: vX.Y.Z` commit (the version in `package.json`,
 `CHANGELOG.md` first, under `## vX.Y.Z`: `scripts/release-notes.sh` takes it
 for the release page, and a release with no section stops before it builds.
 A pre-release tag (`vX.Y.Z-rc.N`) without one gets a line saying what it is.
+Before tagging, run [the release checklist](RELEASE-CHECKLIST.md) on real
+devices: the Windows serial and GPU paths CI can't reach.
 
 ### Local Packaging & AppImage Notice
 ```bash
