@@ -30,7 +30,8 @@ const NO_VAULT_MESSAGE =
 interface NewSessionModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (session: PuttySession) => void;
+  /** Throws (or rejects) when the session wasn't saved. */
+  onSave: (session: PuttySession) => void | Promise<void>;
   editingSession?: PuttySession | null;
   savedSessions?: PuttySession[];
   /** A new session's folder, when opened from a folder's "New Session Here". */
@@ -68,6 +69,8 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
   // "Remove" pressed on a saved enable password: dropped when saving.
   const [removeEnable, setRemoveEnable] = useState(false);
   const [vaultSaveError, setVaultSaveError] = useState<string | null>(null);
+  // Why the last Save didn't save (the backend refused it).
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [nameError, setNameError] = useState<string | null>(null);
   // The vault entry this session already uses, when editing. Its password
   // isn't shown: left blank, it stays as it is.
@@ -176,6 +179,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
     unlockDeclined.current = false;
     refreshPorts();
     setVaultSaveError(null);
+    setSaveError(null);
     setNameError(null);
     vaultListEntriesMeta().then(setVaultEntries).catch(() => {});
     void checkVault();
@@ -423,7 +427,11 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
     if (isSerial) {
       const activeLine = serialLine.trim() || '/dev/ttyUSB0';
       finalHostname = activeLine;
-      finalPort = parseInt(serialSpeed, 10) || 9600;
+      // The speed is SerialSpeed. It used to go in the port too, a 16-bit
+      // number: 115200 and every faster speed couldn't be saved at all. The
+      // port keeps what it was, PuTTY's 22 for a new session.
+      const kept = editingSession?.port ?? 0;
+      finalPort = kept > 0 && kept <= 65535 ? kept : 22;
 
       extra.SerialLine = activeLine;
       extra.SerialSpeed = serialSpeed || '9600';
@@ -640,7 +648,15 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
       lastConnected: editingSession?.lastConnected,
     };
 
-    onSave(session);
+    setSaveError(null);
+    try {
+      await onSave(session);
+    } catch (err) {
+      // It used to close as if saved: the session and every change in it
+      // were simply gone.
+      setSaveError(`The session wasn't saved: ${String(err)}`);
+      return;
+    }
     // Open terminals of this session apply the new delay right away.
     window.dispatchEvent(new CustomEvent<SessionSavedDetail>(SESSION_SAVED_EVENT, {
       detail: { name: session.name, pasteLineDelayMs, autoReconnect: autoReconnectOn, autoEnable, look: sessionLookFrom(extra) },
@@ -798,7 +814,10 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
           </div>
 
           {/* Action Buttons */}
-          <div className="flex justify-end space-x-2 px-4 py-3 border-t border-plinky-800 shrink-0">
+          <div className="flex items-center justify-end space-x-2 px-4 py-3 border-t border-plinky-800 shrink-0">
+            {saveError && (
+              <p role="alert" className="mr-auto text-meta text-rose-300">{saveError}</p>
+            )}
             <button
               type="button"
               onClick={onClose}

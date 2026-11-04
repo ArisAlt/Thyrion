@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { PuttySession, TerminalTab, SyncChannel, SplitLayoutMode } from './types/session';
-import { listPuttySessions, writePuttySession, writeTerminalInput, closeTerminalSession, SHOW_HOST_KEYS_EVENT, takeOpenRequests, listenOpenRequests, startSessionInBackground, OpenRequest, listenSessionConnected, isSessionConnected, listenSessionEnded, isSessionEnded, setSessionLocked } from './services/tauriBridge';
+import { listPuttySessions, writePuttySession, savePuttySession, writeTerminalInput, closeTerminalSession, SHOW_HOST_KEYS_EVENT, takeOpenRequests, listenOpenRequests, startSessionInBackground, OpenRequest, listenSessionConnected, isSessionConnected, listenSessionEnded, isSessionEnded, setSessionLocked } from './services/tauriBridge';
 import { tabColorHex, TAB_COLORS } from './services/tabColors';
 import { newId } from './services/ids';
 import { tabForOpenRequest, throttle } from './services/cliOpen';
@@ -532,8 +532,9 @@ export const App: React.FC = () => {
     setTabs(prev => withTabUpdate(prev, tabId, updates));
   };
 
+  // Throws when the session wasn't saved: the editor stays open and says why.
   const handleSaveSession = async (newSession: PuttySession) => {
-    await writePuttySession(newSession);
+    await savePuttySession(newSession);
     await loadSessions();
   };
 
