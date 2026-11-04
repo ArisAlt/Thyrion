@@ -49,6 +49,7 @@ import { SESSION_SAVED_EVENT, SessionSavedDetail, SessionLook, sessionLookFrom, 
 import { useTerminalTheme, findTerminalTheme } from '../../themes/terminalThemes';
 import { useScrollback } from '../../services/scrollback';
 import { startGpuRenderer, useGpuRendering } from '../../services/renderer';
+import { noteTerminalFocus, shortcutIsFor } from '../../services/terminalKeys';
 import { newId } from '../../services/ids';
 import { VaultUnlockDialog } from '../vault/VaultUnlockDialog';
 import { HostKeyDialog, storedFingerprint } from './HostKeyDialog';
@@ -121,6 +122,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   // just opened never reached the router (e2e suite on a Windows runner).
   const heldInputRef = useRef<Uint8Array[]>([]);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  // This view's outer element: window-wide shortcuts check it (terminalKeys.ts).
+  const viewRef = useRef<HTMLDivElement>(null);
   const isOsc133IntegratedRef = useRef<boolean>(false);
   const isPromptInputRegionRef = useRef<boolean>(true);
   const promptLinesRef = useRef<number[]>([]);
@@ -877,8 +880,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
     });
 
-    // Handle Ctrl+F for search and Ctrl+Up/Down for prompt navigation
+    // Handle Ctrl+F for search and Ctrl+Up/Down for prompt navigation, in
+    // this terminal only (terminalKeys.ts).
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (!shortcutIsFor(tab.id, e.target, viewRef.current)) return;
       // e.code, not e.key: on a Greek layout the F key types "φ".
       if ((e.ctrlKey || e.metaKey) && e.code === 'KeyF') {
         e.preventDefault();
@@ -1328,7 +1333,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   };
 
   return (
-    <div 
+    <div
+      ref={viewRef}
+      data-terminal-view={tab.id}
+      onFocusCapture={() => noteTerminalFocus(tab.id)}
       className="relative flex flex-col h-full w-full bg-plinky-950 overflow-hidden"
       onContextMenu={handleContextMenu}
     >
