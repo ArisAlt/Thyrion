@@ -165,19 +165,6 @@ export async function vaultLock(): Promise<boolean> {
   return true;
 }
 
-export async function vaultGet(key: string): Promise<string | null> {
-  if (isTauriEnvironment()) {
-    try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      return await invoke<string | null>('vault_get', { key });
-    } catch (e) {
-      console.warn(`Failed to get key '${key}' from vault:`, e);
-      return null;
-    }
-  }
-  return null;
-}
-
 export async function vaultSet(key: string, secret: string): Promise<boolean> {
   if (isTauriEnvironment()) {
     try {

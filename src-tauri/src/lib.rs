@@ -171,6 +171,7 @@ pub fn run() {
         .manage(PasteJobs::default())
         .manage(ConnectedSessions::default())
         .manage(scripts::Scripts::default())
+        .manage(PickedScripts::default())
         .setup(move |app| {
             // Password files a crash left in the temp folder (see
             // sweep_password_files). Off the main thread: a big temp folder
@@ -283,7 +284,6 @@ pub fn run() {
             vault_create,
             vault_unlock,
             vault_lock,
-            vault_get,
             vault_set,
             vault_get_entry,
             vault_send_secret,

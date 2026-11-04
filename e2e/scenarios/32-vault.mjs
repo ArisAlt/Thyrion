@@ -9,7 +9,7 @@ const secret = 'e2e-only secret 42';
 // in the page: WebView2's inspector reports a rejected call only as
 // "Uncaught (in promise)", without the backend's message.
 const vaultGetError = (app) => app.run(async (e) => {
-  try { await e.invoke('vault_get', { key: 'e2e:credential' }); return null; }
+  try { await e.invoke('vault_get_entry', { key: 'e2e:credential' }); return null; }
   catch (err) { return String(err?.message ?? err); }
 });
 const openVault = (app) => app.run((e) => e.click(document.querySelector('[aria-label="Vault"]')));
@@ -25,7 +25,7 @@ export const tests = [
     await fill(app, '[aria-label="Key / Session Identifier"]', 'e2e:credential');
     await fill(app, '[aria-label="Secret"]', secret);
     await clickButton(app, 'Save Secret');
-    await app.waitFor(async (e) => (await e.invoke('vault_get', { key: 'e2e:credential' })) === 'e2e-only secret 42');
+    await app.waitFor(async (e) => (await e.invoke('vault_get_entry', { key: 'e2e:credential' }))?.secret === 'e2e-only secret 42');
   }],
 
   ['locking blocks secret access and a wrong master password cannot unlock it', async ({ app }) => {
@@ -43,7 +43,7 @@ export const tests = [
     await fill(app, '#vault-manager-master-password-2', password);
     await clickButton(app, 'Unlock Credential Vault');
     await app.waitFor(async (e) => await e.invoke('vault_is_unlocked'), [], { timeoutMs: 10000 });
-    assert.equal(await app.invoke('vault_get', { key: 'e2e:credential' }), secret);
+    assert.equal((await app.invoke('vault_get_entry', { key: 'e2e:credential' }))?.secret, secret);
     const again = await ctx.restart();
     assert.equal(await again.invoke('vault_is_unlocked'), false);
     assert.match(await vaultGetError(again) ?? 'read the secret', /locked/i);
@@ -51,6 +51,6 @@ export const tests = [
     await fill(again, '#vault-manager-master-password-2', password);
     await clickButton(again, 'Unlock Credential Vault');
     await again.waitFor(async (e) => await e.invoke('vault_is_unlocked'), [], { timeoutMs: 10000 });
-    assert.equal(await again.invoke('vault_get', { key: 'e2e:credential' }), secret);
+    assert.equal((await again.invoke('vault_get_entry', { key: 'e2e:credential' }))?.secret, secret);
   }],
 ];

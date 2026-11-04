@@ -342,13 +342,6 @@ pub(crate) async fn vault_lock(state: State<'_, VaultState>) -> Result<(), Strin
 }
 
 #[tauri::command]
-pub(crate) async fn vault_get(state: State<'_, VaultState>, key: String) -> Result<Option<String>, String> {
-    let guard = state.inner.lock().await;
-    let vault = guard.as_ref().ok_or_else(|| "Vault is locked".to_string())?;
-    Ok(vault.get(&key).map(|s| s.to_string()))
-}
-
-#[tauri::command]
 pub(crate) async fn vault_set(
     state: State<'_, VaultState>,
     key: String,
