@@ -217,18 +217,33 @@ pub fn start(
         let registry = registry.clone();
         let id = session_id.clone();
         let child = child.clone();
+        let stopped = stopped.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
-            loop {
+            'read: loop {
                 match stdout.read(&mut buf) {
                     Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        // The session is gone: nothing left to type into.
-                        if registry.write_input(&id, &buf[..n]).is_err() && registry.is_session_ended(&id) {
-                            let _ = child.lock().unwrap().kill();
-                            break;
+                    Ok(n) => loop {
+                        match registry.write_input(&id, &buf[..n]) {
+                            Ok(()) => break,
+                            // The session has more waiting than it takes:
+                            // hold the script back until it catches up, as
+                            // a blocking write did.
+                            Err(plinky_core::errors::PlinkyError::InputBusy(_))
+                                if !registry.is_session_ended(&id) && !stopped.load(Ordering::Relaxed) =>
+                            {
+                                std::thread::sleep(Duration::from_millis(20));
+                            }
+                            Err(_) => {
+                                // The session is gone: nothing left to type into.
+                                if registry.is_session_ended(&id) {
+                                    let _ = child.lock().unwrap().kill();
+                                    break 'read;
+                                }
+                                break;
+                            }
                         }
-                    }
+                    },
                 }
             }
         });

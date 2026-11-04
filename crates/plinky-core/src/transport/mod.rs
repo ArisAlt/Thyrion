@@ -24,35 +24,54 @@ pub mod telnet;
 /// Bytes are wiped once written: a vault password typed into the session
 /// (`SessionRegistry::type_secret`) passes through here. Once a write fails
 /// (the child is gone), every later one is refused.
+///
+/// At most `MAX_PENDING_INPUT` bytes wait. A blocking write used to hold
+/// back whoever wrote; queued without a limit, a script feeding a session
+/// that had stopped reading could fill memory. Past the limit a write is
+/// refused with `InputBusy`; the script runner waits and tries again.
 pub(crate) struct PtyWriter {
     tx: std::sync::mpsc::Sender<zeroize::Zeroizing<Vec<u8>>>,
     failed: Arc<AtomicBool>,
+    pending: Arc<std::sync::atomic::AtomicUsize>,
 }
+
+/// Input waiting for one session: a few of the largest pastes (1 MiB,
+/// session/paste.rs).
+pub(crate) const MAX_PENDING_INPUT: usize = 4 * 1024 * 1024;
 
 impl PtyWriter {
     pub(crate) fn spawn(mut writer: Box<dyn Write + Send>) -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<zeroize::Zeroizing<Vec<u8>>>();
         let failed = Arc::new(AtomicBool::new(false));
-        let failed_writer = failed.clone();
+        let pending = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (failed_writer, pending_writer) = (failed.clone(), pending.clone());
         // Ends when the transport (and with it `tx`) is dropped.
         std::thread::spawn(move || {
             for data in rx {
-                if writer.write_all(&data).and_then(|_| writer.flush()).is_err() {
+                let ok = writer.write_all(&data).and_then(|_| writer.flush()).is_ok();
+                pending_writer.fetch_sub(data.len(), Ordering::Relaxed);
+                if !ok {
                     failed_writer.store(true, Ordering::Relaxed);
                     break;
                 }
             }
         });
-        Self { tx, failed }
+        Self { tx, failed, pending }
     }
 
     pub(crate) fn write(&self, data: &[u8]) -> Result<()> {
         if self.failed.load(Ordering::Relaxed) {
             return Err(PlinkyError::ProcessError("The session no longer takes input".into()));
         }
-        self.tx
-            .send(zeroize::Zeroizing::new(data.to_vec()))
-            .map_err(|_| PlinkyError::ProcessError("The session no longer takes input".into()))
+        let waiting = self.pending.fetch_add(data.len(), Ordering::Relaxed);
+        if waiting > 0 && waiting + data.len() > MAX_PENDING_INPUT {
+            self.pending.fetch_sub(data.len(), Ordering::Relaxed);
+            return Err(PlinkyError::InputBusy(waiting / 1024));
+        }
+        self.tx.send(zeroize::Zeroizing::new(data.to_vec())).map_err(|_| {
+            self.pending.fetch_sub(data.len(), Ordering::Relaxed);
+            PlinkyError::ProcessError("The session no longer takes input".into())
+        })
     }
 }
 
@@ -264,6 +283,43 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(*got.lock().unwrap(), want, "everything arrives, in order");
+    }
+
+    #[test]
+    fn a_session_that_stops_reading_refuses_input_past_the_limit_then_takes_it_again() {
+        // Queued without a limit, a script feeding a stuck session filled
+        // memory.
+        let (w, open, got) = stuck(false);
+        let chunk = vec![b'x'; 64 * 1024];
+        let mut queued = 0;
+        let refused = loop {
+            match w.write(&chunk) {
+                Ok(()) => queued += chunk.len(),
+                Err(e) => break e,
+            }
+            assert!(queued <= MAX_PENDING_INPUT, "queued past the limit");
+        };
+        assert!(matches!(refused, PlinkyError::InputBusy(_)), "{refused}");
+        assert!(queued + chunk.len() > MAX_PENDING_INPUT);
+        release(&open);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while w.write(&chunk).is_err() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(w.write(&chunk).is_ok(), "drained, it takes input again");
+        while got.lock().unwrap().len() < queued && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(got.lock().unwrap().len() >= queued);
+    }
+
+    #[test]
+    fn one_write_larger_than_the_limit_still_goes_through() {
+        // A paste is capped at 1 MiB; anything larger is still sent when
+        // nothing else is waiting, rather than refused for ever.
+        let (w, open, _got) = stuck(false);
+        assert!(w.write(&vec![b'y'; MAX_PENDING_INPUT + 1]).is_ok());
+        release(&open);
     }
 
     #[test]
