@@ -25,9 +25,39 @@ export function looksLive(text: string): boolean {
   );
 }
 
-/** The session's process has ended, or plink gave up. */
-export function sessionEnded(text: string): boolean {
-  return text.includes('[Thyrion: Session closed') || text.includes('FATAL ERROR:');
+/** Thyrion's own lines for a session that has ended (output_reader.rs). */
+const CLOSED_NOTICES = ['[Thyrion: Session closed', '[Thyrion: Host key was rejected]', '[Thyrion: Error: '];
+
+/**
+ * The session's process has ended, or plink gave up.
+ *
+ * plink's "FATAL ERROR:" only counts before the login is over: after it,
+ * the text is the session's own output, and a log or a file on screen with
+ * that line in it marked a healthy tab disconnected; with auto-reconnect
+ * on, Thyrion closed it and connected again. A drop after the login ends
+ * with Thyrion's own "Session closed" as well.
+ */
+export function sessionEnded(text: string, reachedLive = false): boolean {
+  return CLOSED_NOTICES.some(n => text.includes(n)) || (!reachedLive && text.includes('FATAL ERROR:'));
+}
+
+/**
+ * Whether an ended session reconnects by itself: the session asks for it,
+ * a network one, and plink said the connection failed (a clean `exit`
+ * prints no FATAL), after a login that worked or during the retries that
+ * followed one. Only the first retry happened: it fails before any login,
+ * and the next one waited for a login that had worked.
+ */
+export function reconnectsAfterEnd(s: {
+  autoReconnect: boolean;
+  networkProtocol: boolean;
+  /** The output just before the end. */
+  recent: string;
+  reachedLive: boolean;
+  /** Retries already made since the last login that worked. */
+  attempts: number;
+}): boolean {
+  return s.autoReconnect && s.networkProtocol && s.recent.includes('FATAL ERROR:') && (s.reachedLive || s.attempts > 0);
 }
 
 /**
@@ -48,7 +78,7 @@ export function readOutputStatus(text: string, session: {
    *  until Enter, so any output at all means it is connected (T-020). */
   consoleTarget: boolean;
 }): OutputStatus {
-  if (sessionEnded(text)) return 'ended';
+  if (sessionEnded(text, session.reachedLive)) return 'ended';
   if (session.ended) return 'stillEnded';
   // Only before the login is over. After it, text that looks like a login
   // is the session's own output: Windows' pseudo-console repaints plink's

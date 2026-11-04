@@ -59,7 +59,7 @@ import { TerminalSearchBar } from './TerminalSearchBar';
 import { TerminalHeader } from './TerminalHeader';
 import { registerLinks } from './terminalLinks';
 import { registerShellIntegration, jumpToPrompt } from './shellIntegration';
-import { readOutputStatus } from '../../services/outputStatus';
+import { readOutputStatus, reconnectsAfterEnd } from '../../services/outputStatus';
 import { useTerminalVault } from './useTerminalVault';
 import { useTerminalPaste, listenForPastes } from './useTerminalPaste';
 import { useAutoReconnect } from './useAutoReconnect';
@@ -591,12 +591,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         onUpdateTab(tab.id, { status: 'disconnected' });
         showPrompt(null);
         // A FATAL ERROR after the session was live is a dropped connection
-        // ("Remote side unexpectedly closed", "Network error: ..."). A clean
-        // `exit` prints no FATAL, and a failed login never reached live --
-        // neither reconnects on its own.
+        // ("Remote side unexpectedly closed", "Network error: ..."), and so
+        // is one during the retries after it (outputStatus.ts). A clean
+        // `exit` prints no FATAL, and a first login that failed doesn't
+        // reconnect on its own.
         const networkProtocol = !tab.protocol || tab.protocol === 'SSH' || tab.protocol === 'Telnet';
-        if (text.includes('FATAL ERROR:') && reachedLiveRef.current && autoReconnectRef.current && networkProtocol) {
-          reachedLiveRef.current = false;
+        if (reconnectsAfterEnd({
+          autoReconnect: autoReconnectRef.current, networkProtocol, recent: recentOutputRef.current,
+          reachedLive: reachedLiveRef.current, attempts: reconnectAttemptRef.current,
+        })) {
           scheduleAutoReconnectRef.current();
         }
         reachedLiveRef.current = false;
