@@ -205,6 +205,16 @@ thyrion --ssh [USER@]HOST[:PORT] [--title NAME]
   Linux `thyrion --telnet {host} {port} --title "{name}"`,
   Windows `"C:\Program Files\Thyrion\Thyrion.exe" --telnet %h %p --title "%d"`.
 
+### Releasing
+
+A release is a `release: vX.Y.Z` commit (the version in `package.json`,
+`package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json` and
+`Cargo.lock`) and an annotated tag `vX.Y.Z` on it; pushing the tag runs
+`.github/workflows/release.yml`. Write the version's section in
+`CHANGELOG.md` first, under `## vX.Y.Z`: `scripts/release-notes.sh` takes it
+for the release page, and a release with no section stops before it builds.
+A pre-release tag (`vX.Y.Z-rc.N`) without one gets a line saying what it is.
+
 ### Local Packaging & AppImage Notice
 ```bash
 # Development desktop launch

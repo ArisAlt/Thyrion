@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import { NewSessionModal } from '../components/modals/NewSessionModal';
@@ -1332,13 +1332,13 @@ describe('saving with the vault locked (or not there yet), without unlocking it'
     expect(onSave.mock.calls[0][0].extra.PlinkyVaultKey).toBeUndefined();
   });
 
-  it('a saved session keeps the vault entry it had when saved without unlocking', async () => {
+  it('a saved session keeps the vault entry it had, saved with no unlock when only a setting changed', async () => {
     const onSave = vi.fn();
     render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} editingSession={savedLinked} />);
     fireEvent.change(screen.getByLabelText(/^Port$/i), { target: { value: '2222' } });
     fireEvent.click(screen.getByRole('button', { name: /^save changes$/i }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Save without the password' }));
     await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(screen.queryByRole('dialog', { name: 'Unlock the vault' })).toBeNull();
     const saved = onSave.mock.calls[0][0];
     expect(saved.port).toBe(2222);
     expect(saved.extra.PlinkyVaultKey).toBe('session:core-rtr');
@@ -1391,5 +1391,93 @@ describe('saving with the vault locked (or not there yet), without unlocking it'
     expect(mockVaultUnlock).toHaveBeenCalledWith('m4ster');
     expect(mockVaultSetEntry).toHaveBeenCalledWith(expect.objectContaining({ id: 'session:edge-1', secret: 's3cret', enable_secret: 'en4ble' }));
     expect(onSave.mock.calls[0][0].extra.PlinkyVaultKey).toBe('session:edge-1');
+  });
+});
+
+describe('editing a session whose login is in a locked vault', () => {
+  // Reported: changing a saved serial session's COM port did nothing on
+  // Save. Save stopped for the master password ("Saving this session writes
+  // its password to the vault") though no password had been touched, and
+  // Cancel saved nothing, without a word. SSH sessions the same.
+  const linked = (protocol: 'Serial' | 'SSH') => ({
+    name: 'Core R1',
+    hostname: protocol === 'SSH' ? '192.0.2.10' : '',
+    port: protocol === 'SSH' ? 22 : 0,
+    protocol,
+    username: protocol === 'SSH' ? 'ops' : undefined,
+    extra: (protocol === 'Serial'
+      ? { SerialLine: '/dev/ttyUSB0', SerialSpeed: '9600', SerialDataBits: '8', SerialStopHalfbits: '2', SerialParity: '0', SerialFlowControl: '1', PlinkyVaultKey: 'session:Core R1' }
+      : { PlinkyVaultKey: 'session:Core R1' }) as Record<string, string>,
+  });
+  const unlockAsked = () => screen.queryByRole('dialog', { name: 'Unlock the vault' });
+
+  beforeEach(() => {
+    mockVaultIsInitialized.mockResolvedValue(true);
+    mockVaultIsUnlocked.mockResolvedValue(false);
+    mockVaultListEntriesMeta.mockRejectedValue('Vault is locked');
+    mockVaultSetEntry.mockClear();
+  });
+  afterEach(() => {
+    mockVaultIsUnlocked.mockResolvedValue(true);
+    mockVaultListEntriesMeta.mockResolvedValue([{ id: 'router-cisco-core', has_enable_secret: true }]);
+  });
+
+  it('saves a new serial port without asking for the master password, and keeps the login', async () => {
+    const onSave = vi.fn();
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} editingSession={linked('Serial')} />);
+    await waitFor(() => expect(screen.getByText(/● \/dev\/ttyUSB0/)).toBeDefined());
+    fireEvent.change(screen.getByLabelText('Serial line'), { target: { value: '/dev/ttyACM0' } });
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(unlockAsked()).toBeNull();
+    expect(onSave.mock.calls[0][0].extra).toEqual(expect.objectContaining({ SerialLine: '/dev/ttyACM0', PlinkyVaultKey: 'session:Core R1' }));
+    expect(mockVaultSetEntry).not.toHaveBeenCalled();
+  });
+
+  it('saves an SSH session\'s new host the same way', async () => {
+    const onSave = vi.fn();
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} editingSession={linked('SSH')} />);
+    fireEvent.change(document.getElementById('new-session-modal-host-name-or-ip-address')!, { target: { value: '192.0.2.11' } });
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(unlockAsked()).toBeNull();
+    expect(onSave.mock.calls[0][0]).toEqual(expect.objectContaining({ hostname: '192.0.2.11' }));
+    expect(onSave.mock.calls[0][0].extra.PlinkyVaultKey).toBe('session:Core R1');
+  });
+
+  it('a renamed session keeps the entry it already uses', async () => {
+    const onSave = vi.fn();
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} editingSession={linked('SSH')} />);
+    fireEvent.change(screen.getByLabelText(/^Session name$/i), { target: { value: 'Core R1 new' } });
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(unlockAsked()).toBeNull();
+    expect(onSave.mock.calls[0][0].extra.PlinkyVaultKey).toBe('session:Core R1');
+  });
+
+  it('a password typed still asks to unlock: it has to go into the vault', async () => {
+    const onSave = vi.fn();
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} editingSession={linked('SSH')} />);
+    fireEvent.click(screen.getByRole('tab', { name: /Credentials & Vault/i }));
+    // Opening Credentials asks first; "Not now", then type and Save.
+    fireEvent.click(await screen.findByRole('button', { name: /cancel|not now/i }));
+    fireEvent.change(screen.getAllByPlaceholderText('Saved. Type to replace')[0], { target: { value: 'n3w-pass' } });
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    expect(await screen.findByRole('dialog', { name: 'Unlock the vault' })).toBeDefined();
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it('with no vault at all, a port change still saves', async () => {
+    // A session linked to an entry in a vault that was since removed: Save
+    // said "Enter the login password..." and wouldn't save anything else.
+    mockVaultIsInitialized.mockResolvedValue(false);
+    const onSave = vi.fn();
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} editingSession={linked('Serial')} />);
+    await waitFor(() => expect(screen.getByText(/● \/dev\/ttyUSB0/)).toBeDefined());
+    fireEvent.change(screen.getByLabelText('Serial line'), { target: { value: '/dev/ttyACM0' } });
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave.mock.calls[0][0].extra.SerialLine).toBe('/dev/ttyACM0');
+    mockVaultIsInitialized.mockResolvedValue(true);
   });
 });

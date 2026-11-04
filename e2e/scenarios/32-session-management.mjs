@@ -17,6 +17,11 @@ export async function setup({ home, defer }) {
   writePuttySession(home, 'Edge R6', {
     HostName: '127.0.0.1', PortNumber: a.port, Protocol: 'telnet', PlinkyFolder: 'Lab',
   });
+  // A console whose login is in the vault (the entry is added by a test).
+  writePuttySession(home, 'Console R7', {
+    Protocol: 'serial', SerialLine: '/dev/ttyS9', SerialSpeed: 9600, SerialDataBits: 8, SerialStopHalfbits: 2,
+    SerialParity: 0, SerialFlowControl: 0, PlinkyVaultKey: 'session:Vaulted R9',
+  });
   return { state: { a, b } };
 }
 
@@ -318,5 +323,48 @@ export const tests = [
     assert.equal(await app.invoke('vault_is_unlocked'), true);
     const entry = await app.invoke('vault_get_entry', { key: 'session:Vaulted R9' });
     assert.equal(entry.enable_secret, 'en4ble');
+  }],
+
+  ['with the vault locked, a new host saves without asking for the master password, and keeps the login', async ({ app }) => {
+    // Reported on a serial console's COM port: Save asked for the master
+    // password ("Saving this session writes its password to the vault")
+    // though none had been typed, and Cancel saved nothing.
+    await app.invoke('vault_lock');
+    await openEditor(app, (e) => {
+      const btn = document.querySelector('button[aria-label="Edit Vaulted R9"]');
+      btn.scrollIntoView();
+      return e.click(btn);
+    });
+    await fillEditor(app, { host: '192.0.2.31' });
+    await save(app);
+    await waitUntil(async () => (await stored(app, 'Vaulted R9'))?.host_name === '192.0.2.31', { what: 'the new host saved', timeoutMs: 3000 });
+    assert.equal(await editorOpen(app), false, 'the editor closes on save');
+    assert.equal(await app.run(() => !!document.getElementById('vault-unlock-password')), false, 'no master password asked');
+    assert.equal((await stored(app, 'Vaulted R9')).extra?.PlinkyVaultKey, 'session:Vaulted R9', 'the vault entry is still linked');
+    assert.equal(await app.invoke('vault_is_unlocked'), false);
+  }],
+
+  ['with the vault locked, a serial console\'s new port saves the same way', async ({ app }) => {
+    await app.run((e) => {
+      const btn = document.querySelector('button[aria-label="Edit Console R7"]');
+      btn.scrollIntoView();
+      return e.click(btn);
+    });
+    await app.waitFor((e) => [...document.querySelectorAll('[aria-label="Serial line"]')].some(e.visible), [], { what: 'the serial session editor' });
+    await app.run((e) => {
+      const sel = [...document.querySelectorAll('select[aria-label="Serial line"]')].find(e.visible);
+      if (sel) {
+        Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(sel, '__custom__');
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      return true;
+    });
+    await sleep(100);
+    await app.run((e) => e.fill([...document.querySelectorAll('input[aria-label="Serial line"]')].find(e.visible), '/dev/ttyS8'));
+    await sleep(50);
+    await save(app);
+    await waitUntil(async () => (await stored(app, 'Console R7'))?.extra?.SerialLine === '/dev/ttyS8', { what: 'the new port saved', timeoutMs: 3000 });
+    assert.equal(await app.run(() => !!document.getElementById('vault-unlock-password')), false, 'no master password asked');
+    assert.equal((await stored(app, 'Console R7')).extra?.PlinkyVaultKey, 'session:Vaulted R9');
   }],
 ];

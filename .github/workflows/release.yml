@@ -36,6 +36,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # The release page's notes: this version's section of CHANGELOG.md. A
+      # release without one stops here, before the build and before anything is
+      # published.
+      - name: Release notes from CHANGELOG.md
+        shell: bash
+        run: scripts/release-notes.sh "$RELEASE_TAG" > "$RUNNER_TEMP/release-notes.md"
+
       - name: Install system dependencies & PuTTY
         run: |
           sudo apt-get update
@@ -95,6 +102,7 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           target_commitish: ${{ github.sha }}
           prerelease: ${{ env.PRERELEASE }}
+          body_path: ${{ runner.temp }}/release-notes.md
           files: |
             target/release/bundle/appimage/*.AppImage
             target/release/bundle/deb/*.deb
@@ -251,12 +259,18 @@ jobs:
             target/release/bundle/nsis/*.exe
             dist-release/*
 
+      # The same notes, so this update of the release keeps them.
+      - name: Release notes from CHANGELOG.md
+        shell: bash
+        run: scripts/release-notes.sh "$RELEASE_TAG" > "$RUNNER_TEMP/release-notes.md"
+
       - name: Upload Release Assets to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           target_commitish: ${{ github.sha }}
           prerelease: ${{ env.PRERELEASE }}
+          body_path: ${{ runner.temp }}/release-notes.md
           files: |
             target/release/bundle/msi/*.msi
             target/release/bundle/nsis/*.exe

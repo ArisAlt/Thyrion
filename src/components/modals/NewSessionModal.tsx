@@ -391,11 +391,22 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
     const jumpInUse = protocol === 'SSH' && enableJumpHost && !jumpPreset && !!jumpHost.trim();
     const typedSecret = (useVault && vaultMode === 'new' && (!!vaultPassword || !!vaultEnablePassword)) || (jumpInUse && !!jumpPassword);
     const needsVault = (useVault && vaultMode === 'new') || (jumpInUse && !!jumpPassword);
+    // Nothing for the vault to do: no password typed or removed, and the
+    // entry the session already uses. With the vault locked, a new COM port
+    // or host used to stop Save for the master password ("Saving this
+    // session writes its password to the vault"), and Cancel saved nothing.
+    const credentialsUnchanged = useVault && vaultMode === 'new' && !vaultPassword && !vaultEnablePassword
+      && !removeEnable && (vaultKeyId.trim() || `session:${sessionName}`) === savedVaultKey;
+    let leaveVault = false;
     let noVault = vaultState === 'none';
     if (needsVault && !skipVault) {
       noVault = !(await vaultIsInitialized().catch(() => true));
       const open = !noVault && await vaultIsUnlocked().catch(() => false);
-      if (!open && (!noVault || typedSecret)) {
+      const jumpSecret = jumpInUse && !!jumpPassword;
+      if (!open && credentialsUnchanged && !jumpSecret) {
+        // Saved as "Save without the password" would: the link stays.
+        leaveVault = true;
+      } else if (!open && (!noVault || typedSecret)) {
         setVaultState(noVault ? 'none' : 'locked');
         setUnlockFor('save');
         return;
@@ -508,7 +519,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
     if (useVault) {
       if (vaultMode === 'link' && selectedVaultKey) {
         extra.PlinkyVaultKey = selectedVaultKey;
-      } else if (vaultMode === 'new' && skipVault) {
+      } else if (vaultMode === 'new' && (skipVault || leaveVault)) {
         // Saved without the vault: nothing is written to it, and the session
         // keeps only the entry it already had (one it can't check is not
         // linked: a link to an entry that isn't there finds nothing).
