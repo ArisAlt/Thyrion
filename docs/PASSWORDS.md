@@ -56,6 +56,12 @@ settings and stores no password: the vault is not touched, and a session
 that already used a vault entry keeps it. Escape goes back to the settings
 without saving anything.
 
+Changing anything else in a session that already uses a vault entry (its
+serial port, host, name or any other setting) doesn't need the vault: with
+it locked, Save stores the change straight away and the session keeps its
+entry. The vault is asked for only when a password is typed or removed, or
+the session is pointed at a different entry.
+
 ## When a password leaves the vault
 
 ### Logging in to an SSH session
