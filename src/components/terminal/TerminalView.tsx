@@ -49,6 +49,7 @@ import { SESSION_SAVED_EVENT, SessionSavedDetail, SessionLook, sessionLookFrom, 
 import { useTerminalTheme, findTerminalTheme } from '../../themes/terminalThemes';
 import { useScrollback } from '../../services/scrollback';
 import { startGpuRenderer, useGpuRendering } from '../../services/renderer';
+import { resetConsoleLogin, forgetConsoleLogin } from '../../services/consoleLogin';
 import { newId } from '../../services/ids';
 import { VaultUnlockDialog } from '../vault/VaultUnlockDialog';
 import { HostKeyDialog, storedFingerprint } from './HostKeyDialog';
@@ -259,7 +260,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     enableNotice, setEnableNotice, copiedVaultKey, refreshVault,
     handleSendVaultPassword, handleSendVaultEnablePassword, requestEnablePassword, requestEnableRef, afterUnlock,
     handleCopyVaultPassword, handleCopyVaultEnablePassword,
-    typedRef, autoLoginSentRef, commandRunRef, autoRespondRef,
+    typedRef, commandRunRef, autoRespondRef,
   } = useTerminalVault(tab, isLocalSession, addEventLog);
 
   // When plink was started and nothing has come back yet. An unreachable
@@ -303,6 +304,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const isSerial = tab.protocol === 'Serial';
   const { pasteDelayRef, pasteJob, deliverTypedPaste, pasteFromClipboard, pasteActionsRef } = useTerminalPaste({
     tab, isSerial, isLivePtyRef, terminalRef, addEventLog, detectedPasswordPrompt, recentOutputRef,
+    // A paste that goes line by line skips xterm, where typed commands are
+    // seen: its lines are commands run too, or the console's password
+    // could go to a Password: one of them started (an ssh).
+    onCommandsSent: () => { commandRunRef.current = true; },
   });
 
   // Locked read only (tab menu): keys are dropped here, and the backend
@@ -563,7 +568,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       // prompt split across chunks, or IOS's "enable" then "Password:", is seen.
       recentOutputRef.current = appendRecentOutput(recentOutputRef.current, text);
       const promptKind = classifyPasswordPrompt(recentOutputRef.current);
-      const answeredAutomatically = autoRespondRef.current(promptKind, recentOutputRef.current);
+      // Never from replayed output: the prompt in it may be long answered,
+      // or belong to something started since (an ssh from the console).
+      const answeredAutomatically = live && autoRespondRef.current(promptKind, recentOutputRef.current);
 
       const hint = live ? fatalHint(text, tab.hostname, tab.port) : null;
       if (hint) term.writeln(`\x1b[33m[Thyrion: ${hint}]\x1b[0m`);
@@ -737,8 +744,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       reachedLiveRef.current = false; // a new login, shown as one
       endedRef.current = false; // a new process
       typedRef.current = { line: '', submitted: null };
-      autoLoginSentRef.current = { user: false, password: false };
-      commandRunRef.current = false; // a new connection logs in again
+      resetConsoleLogin(tab.id); // a new connection logs in again
       setDetectedPasswordPrompt(null);
       term.writeln(deferredRef.current ? '\x1b[33m[Thyrion: Connecting...]\x1b[0m' : '\r\n\x1b[33m[Thyrion: Reconnecting...]\x1b[0m');
       deferredRef.current = false;
@@ -942,6 +948,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       // scrollback rather than wait for acknowledgements (ADR-006).
       acker.dispose();
       if (!isSessionClosed(tab.id)) void detachTerminalSession(tab.id);
+      else forgetConsoleLogin(tab.id);
       shellIntegration.dispose();
       disposed = true;
       highlightScans.dispose();

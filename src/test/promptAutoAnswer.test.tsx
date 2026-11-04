@@ -26,14 +26,16 @@ vi.mock('@xterm/addon-web-links', () => ({ WebLinksAddon: function WebLinksAddon
 vi.mock('@xterm/addon-unicode11', () => ({ Unicode11Addon: function Unicode11Addon() { return stand(); } }));
 vi.mock('@xterm/addon-webgl', () => ({ WebglAddon: function WebglAddon() { return stand(); } }));
 
-const bridge = vi.hoisted(() => ({ liveChunk: null as null | ((chunk: Uint8Array) => void), sent: [] as string[] }));
+const bridge = vi.hoisted(() => ({ liveChunk: null as null | ((chunk: Uint8Array) => void), sent: [] as string[], replay: '' }));
 
 vi.mock('../services/tauriBridge', async (orig) => ({
   ...(await orig<typeof import('../services/tauriBridge')>()),
   isTauriEnvironment: () => true,
   attachTerminalSession: async (id: string, _seq: number, onData: (c: Uint8Array) => void) => {
     bridge.liveChunk = onData;
-    return { session_id: id, replay_data: [], truncated: false, is_live: true, pending_prompt: null };
+    // A replay arrives once the vault is known, as it can after a remount.
+    if (bridge.replay) await new Promise(r => setTimeout(r, 30));
+    return { session_id: id, replay_data: Array.from(new TextEncoder().encode(bridge.replay)), truncated: false, is_live: true, pending_prompt: null };
   },
   // A console that logs in from the vault by itself.
   vaultLookup: async () => ({ locked: false, key: 'Core SW1', hasEnableSecret: false, hasLoginSecret: true, username: null, autoLogin: true, autoEnable: false }),
@@ -42,6 +44,7 @@ vi.mock('../services/tauriBridge', async (orig) => ({
 }));
 
 import { TerminalView } from '../components/terminal/TerminalView';
+import { consoleLoginState, forgetConsoleLogin } from '../services/consoleLogin';
 import type { TerminalTab } from '../types/session';
 
 const tab: TerminalTab = {
@@ -50,7 +53,7 @@ const tab: TerminalTab = {
 };
 
 describe('a password prompt answered automatically', () => {
-  beforeEach(() => { bridge.liveChunk = null; bridge.sent = []; });
+  beforeEach(() => { bridge.liveChunk = null; bridge.sent = []; bridge.replay = ''; forgetConsoleLogin(tab.id); });
 
   it('leaves no Send password offer behind', async () => {
     // The offer was put up and taken down in the same chunk; taking it down
@@ -62,5 +65,24 @@ describe('a password prompt answered automatically', () => {
     await act(async () => { await new Promise(r => setTimeout(r, 20)); });
     expect(bridge.sent).toEqual(['login']);
     expect(screen.queryByRole('button', { name: 'Send password' })).toBeNull();
+  });
+
+  it('answers nothing in replayed output: switching back to the tab sent the console password to a nested ssh', async () => {
+    // The tab was switched away and back: its view remounted, and the
+    // scrollback replayed ends with another host's password prompt.
+    bridge.replay = 'Core-SW1#ssh admin@10.0.0.2\r\nadmin@10.0.0.2\'s password: ';
+    await act(async () => { render(<TerminalView tab={tab} onUpdateTab={() => {}} />); });
+    await act(async () => { await new Promise(r => setTimeout(r, 80)); });
+    expect(bridge.sent).toEqual([]);
+  });
+
+  it('remembers across a remount that a command was run, so a later Password: gets nothing', async () => {
+    // Set by the view before the tab switch, kept per tab for the connection.
+    consoleLoginState(tab.id).commandRun = true;
+    await act(async () => { render(<TerminalView tab={tab} onUpdateTab={() => {}} />); });
+    await act(async () => { await new Promise(r => setTimeout(r, 20)); });
+    await act(async () => { bridge.liveChunk!(new TextEncoder().encode('\r\nadmin@10.0.0.2\'s password: ')); });
+    await act(async () => { await new Promise(r => setTimeout(r, 20)); });
+    expect(bridge.sent).toEqual([]);
   });
 });

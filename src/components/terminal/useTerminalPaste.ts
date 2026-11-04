@@ -20,7 +20,7 @@ export interface PasteActions {
 // How a terminal pastes: through the paste window when Settings asks for
 // it, then flat out, through xterm, or one line at a time.
 
-export function useTerminalPaste({ tab, isSerial, isLivePtyRef, terminalRef, addEventLog, detectedPasswordPrompt, recentOutputRef }: {
+export function useTerminalPaste({ tab, isSerial, isLivePtyRef, terminalRef, addEventLog, detectedPasswordPrompt, recentOutputRef, onCommandsSent }: {
   tab: TerminalTab;
   isSerial: boolean;
   isLivePtyRef: React.RefObject<boolean>;
@@ -28,6 +28,8 @@ export function useTerminalPaste({ tab, isSerial, isLivePtyRef, terminalRef, add
   addEventLog: AddEventLog;
   detectedPasswordPrompt: 'login' | 'enable' | null;
   recentOutputRef: React.RefObject<string>;
+  /** A paste sent line by line went out: its lines are commands run. */
+  onCommandsSent?: () => void;
 }) {
   // ---- Paste with a delay between lines (T-015) --------------------------
   // Console ports and network gear drop characters when a config is pasted
@@ -61,6 +63,7 @@ export function useTerminalPaste({ tab, isSerial, isLivePtyRef, terminalRef, add
     }
     const delay = pasteDelayRef.current;
     if (pacedPaste(text)) {
+      onCommandsSent?.();
       const total = text.replace(/[\r\n]+$/, '').split(/\r\n|\r|\n/).length;
       setPasteJob({ sent: 0, total });
       try {
