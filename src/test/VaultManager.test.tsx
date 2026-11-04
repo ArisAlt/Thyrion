@@ -190,3 +190,22 @@ describe('removing the only password of an enable-only entry', () => {
     expect(vaultSetEntry).not.toHaveBeenCalled();
   });
 });
+
+describe('copying a vault password', () => {
+  it('copies it without showing it', async () => {
+    // Copy went through Reveal's fetch: the password appeared on screen and
+    // stayed there after the clipboard was cleared.
+    const clip = await import('../services/clipboard');
+    const write = vi.spyOn(clip, 'writeClipboard').mockResolvedValue(undefined as never);
+    vi.mocked(vaultIsUnlocked).mockResolvedValue(true);
+    vi.mocked(vaultListEntriesMeta).mockResolvedValue([
+      { id: 'session:core-sw1', username: 'netops', has_enable_secret: false, notes: '', created_at: 100, updated_at: 100 },
+    ]);
+    vi.mocked(vaultGetEntry).mockResolvedValue({ id: 'session:core-sw1', username: 'netops', secret: 'old-pass', created_at: 100, updated_at: 100 } as never);
+    render(<VaultManager />);
+    fireEvent.click(await screen.findByTitle(/^Copy Secret/));
+    await waitFor(() => expect(write).toHaveBeenCalledWith('old-pass'));
+    expect(screen.queryByText('old-pass')).toBeNull();
+    write.mockRestore();
+  });
+});
