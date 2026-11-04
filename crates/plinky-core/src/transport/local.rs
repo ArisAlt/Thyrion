@@ -1,4 +1,3 @@
-use std::io::Write;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use tokio::sync::mpsc;
 use crate::errors::{PlinkyError, Result};
@@ -6,7 +5,7 @@ use crate::transport::Transport;
 
 pub struct LocalTransport {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writer: super::PtyWriter,
     child: super::PtyChild,
 }
 
@@ -57,7 +56,7 @@ impl LocalTransport {
 
         Ok(Self {
             master: pair.master,
-            writer,
+            writer: super::PtyWriter::spawn(writer),
             child,
         })
     }
@@ -65,11 +64,7 @@ impl LocalTransport {
 
 impl Transport for LocalTransport {
     fn write(&mut self, data: &[u8]) -> Result<()> {
-        self.writer
-            .write_all(data)
-            .map_err(|e| PlinkyError::IoError(e))?;
-        self.writer.flush().map_err(|e| PlinkyError::IoError(e))?;
-        Ok(())
+        self.writer.write(data)
     }
 
     fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {

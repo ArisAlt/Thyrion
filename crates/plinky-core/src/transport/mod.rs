@@ -1,6 +1,6 @@
-use crate::errors::Result;
+use crate::errors::{PlinkyError, Result};
 use crate::session::flow::FlowGate;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -11,6 +11,50 @@ pub mod plink;
 pub mod serial;
 pub mod tcp_state;
 pub mod telnet;
+
+/// Writes to a pty on a thread of its own, in order.
+///
+/// A pty write blocks while the child isn't reading: a paste into a busy
+/// program fills the pty's input buffer, plink stops reading while its
+/// network is slow, Windows' pseudo-console stalls. Transports are written
+/// with the registry's sessions lock held, and every tab's output needs that
+/// lock: one blocked write stopped output and input in every tab. Native
+/// telnet and serial already wrote from their own threads.
+///
+/// Bytes are wiped once written: a vault password typed into the session
+/// (`SessionRegistry::type_secret`) passes through here. Once a write fails
+/// (the child is gone), every later one is refused.
+pub(crate) struct PtyWriter {
+    tx: std::sync::mpsc::Sender<zeroize::Zeroizing<Vec<u8>>>,
+    failed: Arc<AtomicBool>,
+}
+
+impl PtyWriter {
+    pub(crate) fn spawn(mut writer: Box<dyn Write + Send>) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<zeroize::Zeroizing<Vec<u8>>>();
+        let failed = Arc::new(AtomicBool::new(false));
+        let failed_writer = failed.clone();
+        // Ends when the transport (and with it `tx`) is dropped.
+        std::thread::spawn(move || {
+            for data in rx {
+                if writer.write_all(&data).and_then(|_| writer.flush()).is_err() {
+                    failed_writer.store(true, Ordering::Relaxed);
+                    break;
+                }
+            }
+        });
+        Self { tx, failed }
+    }
+
+    pub(crate) fn write(&self, data: &[u8]) -> Result<()> {
+        if self.failed.load(Ordering::Relaxed) {
+            return Err(PlinkyError::ProcessError("The session no longer takes input".into()));
+        }
+        self.tx
+            .send(zeroize::Zeroizing::new(data.to_vec()))
+            .map_err(|_| PlinkyError::ProcessError("The session no longer takes input".into()))
+    }
+}
 
 /// Handle to a PTY child whose output is being pumped by [`pump_pty_child`].
 pub(crate) struct PtyChild {
@@ -157,4 +201,80 @@ pub trait Transport: Send {
 
     /// Checks if the underlying process is still running.
     fn is_alive(&mut self) -> bool;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Condvar;
+
+    type Gate = Arc<(Mutex<bool>, Condvar)>;
+
+    /// A pty whose child stops reading until `release`.
+    struct StuckPty {
+        open: Gate,
+        got: Arc<Mutex<Vec<u8>>>,
+        fail: bool,
+    }
+
+    impl Write for StuckPty {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let (lock, cv) = &*self.open;
+            let mut open = lock.lock().unwrap();
+            while !*open {
+                open = cv.wait(open).unwrap();
+            }
+            if self.fail {
+                return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "child gone"));
+            }
+            self.got.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn stuck(fail: bool) -> (PtyWriter, Gate, Arc<Mutex<Vec<u8>>>) {
+        let open = Arc::new((Mutex::new(false), Condvar::new()));
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let w = PtyWriter::spawn(Box::new(StuckPty { open: open.clone(), got: got.clone(), fail }));
+        (w, open, got)
+    }
+
+    fn release(open: &Gate) {
+        *open.0.lock().unwrap() = true;
+        open.1.notify_all();
+    }
+
+    #[test]
+    fn a_child_that_stops_reading_does_not_hold_up_the_writer() {
+        // The registry writes with every session's lock held: a write that
+        // waited for the child here froze every tab.
+        let (w, open, got) = stuck(false);
+        let started = std::time::Instant::now();
+        for _ in 0..1000 {
+            w.write(b"show running-config\r").unwrap();
+        }
+        assert!(started.elapsed() < Duration::from_millis(500), "writes waited for the child");
+        release(&open);
+        let want = b"show running-config\r".repeat(1000);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while got.lock().unwrap().len() < want.len() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(*got.lock().unwrap(), want, "everything arrives, in order");
+    }
+
+    #[test]
+    fn once_a_write_fails_later_ones_are_refused() {
+        let (w, open, _got) = stuck(true);
+        w.write(b"a").unwrap();
+        release(&open);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while w.write(b"b").is_ok() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(w.write(b"c").is_err());
+    }
 }

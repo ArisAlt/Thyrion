@@ -96,7 +96,7 @@ pub fn sweep_password_files(dir: &Path, min_age: std::time::Duration) -> usize {
 
 pub struct PlinkTransport {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writer: super::PtyWriter,
     child: super::PtyChild,
     /// Telnet and raw consoles are driven in character mode; see
     /// `LineDiscipline`.
@@ -782,7 +782,7 @@ impl PlinkTransport {
 
         Ok(Self {
             master: pair.master,
-            writer,
+            writer: super::PtyWriter::spawn(writer),
             child,
             char_mode,
             pid,
@@ -839,11 +839,7 @@ impl Transport for PlinkTransport {
                 }
             }
         }
-        self.writer
-            .write_all(&data)
-            .map_err(PlinkyError::IoError)?;
-        self.writer.flush().map_err(PlinkyError::IoError)?;
-        Ok(())
+        self.writer.write(&data)
     }
 
     fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
