@@ -621,13 +621,16 @@ impl PsftpPasswordGuard {
 /// that name the user had was overwritten, or deleted when the download
 /// failed, and two downloads of the same file wrote into one another.
 /// Only this file is renamed into place or removed afterwards.
+///
+/// Its name doesn't carry the destination's: with a process id and a count
+/// added, a long file name (242 bytes) went over the 255-byte limit and the
+/// download failed before it started.
 fn reserve_part_file(dest: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
     static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = dest.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
-    let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "download".into());
     loop {
         let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let part = dir.join(format!(".{name}.{}-{n}.thyrion-part", std::process::id()));
+        let part = dir.join(format!(".thyrion-download-{}-{n}.part", std::process::id()));
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&part) {
             Ok(_) => return Ok(part),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -766,6 +769,18 @@ mod describe_failure_tests {
         assert_ne!(a, b, "two downloads of one file get a file each");
         assert_eq!(a.parent(), Some(dir.as_path()), "next to the destination, so the rename stays on one disk");
         assert_eq!(std::fs::read(&theirs).unwrap(), b"the user's own file");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_download_with_a_long_file_name_gets_a_file_to_go_into() {
+        // The destination's name was part of the temporary one: at 242
+        // bytes, with a process id and a count added, it went over 255.
+        let dir = std::env::temp_dir().join(format!("thyrion-long-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join(format!("{}.txt", "x".repeat(250)));
+        let part = reserve_part_file(&dest).unwrap();
+        assert!(part.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
