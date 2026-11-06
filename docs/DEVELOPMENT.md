@@ -47,41 +47,12 @@ Zmodem. `plink` handles keys and agents itself.
 
 ## 2. Architecture
 
-Thyrion is organised as a Cargo workspace with a Tauri v2 shell and a web interface:
-
-```mermaid
-flowchart TD
-    subgraph UI_Workbench ["UI Workbench (Tauri Webview: TypeScript + React 19 + xterm.js)"]
-        Docking["Multi-Tab & Split Pane Docking (dockview)"]
-        FreeType["Free Type Mode Engine (OSC 133 prompt gated)"]
-        SyncManager["Sync Input Broadcast UI (Channels A-D)"]
-        RegexEngine["Regex Token Decorator (IDecoration + registerLinkProvider)"]
-        SFTPPane["Dual-Pane SFTP Explorer (psftp)"]
-        SnippetBar["Quick Command / Snippet Palette"]
-        TunnelGUI["Visual SSH Tunnel Manager"]
-    end
-
-    subgraph Rust_Backend ["crates/plinky-core (Core Terminal Engine)"]
-        ChannelStream["tauri::ipc::Channel (Binary Streaming & Watermarks)"]
-        PTYMgr["PTY & Process Lifecycle (portable-pty)"]
-        SyncRouter["SyncInputRouter (Live-Only Filtering & Paste Guard)"]
-        SessionMgr["Session Manager & Scrollback Ring Buffers"]
-        ShellBootstrap["Shell Integration Bootstrap (OSC 133 + OSC 7)"]
-        PlinkRunner["Plink Transport (plink: SSH)"]
-        NetRunner["Telnet / Raw Transport (native)"]
-    end
-
-    subgraph PuTTY_Subsystem ["crates/putty-compat (Standalone PuTTY Crate)"]
-        LinuxReg["Linux PUTTYDIR / ~/.putty/sessions File Parser & Writer"]
-        WinReg["Windows Registry Bridge (winreg crate)"]
-        PPKEngine[".ppk (v2/v3) Header Parser & Fingerprinting"]
-        HostKeyVerifier["Host Key Listing (~/.putty/sshhostkeys & WinReg)"]
-    end
-
-    UI_Workbench <-->|tauri::ipc::Channel (Raw Binary)| Rust_Backend
-    Rust_Backend <--> PuTTY_Subsystem
-    Rust_Backend <--> RemoteServers["Remote SSH Servers / Serial Consoles"]
-```
+A Cargo workspace (`crates/plinky-core`, the sessions, transports, vault and
+SFTP; `crates/putty-compat`, PuTTY's session store) under a Tauri v2 shell
+(`src-tauri`), with a React 19 + xterm.js page (`src/`).
+[ARCHITECTURE.md](ARCHITECTURE.md) has the parts, how output and input flow,
+where a password may go, how it scales and fails, and the known design debt
+with what to change next.
 
 ---
 

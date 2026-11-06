@@ -339,6 +339,16 @@ export const VaultManager: React.FC<VaultManagerProps> = ({ onClose }) => {
   // the fetch failed, so callers don't act on a stale/empty secret.
   const fetchSecret = async (key: string): Promise<string | null> => {
     if (revealedSecrets[key] !== undefined) return revealedSecrets[key];
+    const secret = await readSecret(key);
+    if (secret !== null) setRevealedSecrets(prev => ({ ...prev, [key]: secret }));
+    return secret;
+  };
+
+  // The secret without revealing it. Copy used fetchSecret, which keeps
+  // the secret for showing: copying a password put it on screen as well,
+  // and it stayed there after the clipboard was cleared.
+  const readSecret = async (key: string): Promise<string | null> => {
+    if (revealedSecrets[key] !== undefined) return revealedSecrets[key];
     setRevealLoading(key);
     try {
       const entry: VaultEntry | null = await vaultGetEntry(key);
@@ -346,7 +356,6 @@ export const VaultManager: React.FC<VaultManagerProps> = ({ onClose }) => {
         setError(`Credential '${key}' not found`);
         return null;
       }
-      setRevealedSecrets(prev => ({ ...prev, [key]: entry.secret }));
       return entry.secret;
     } catch (e: any) {
       setError(e.toString());
@@ -384,7 +393,7 @@ export const VaultManager: React.FC<VaultManagerProps> = ({ onClose }) => {
   };
 
   const copyToClipboard = async (key: string) => {
-    const secret = await fetchSecret(key);
+    const secret = await readSecret(key);
     if (secret === null) return;
     await writeClipboard(secret);
     setCopiedKey(key);

@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { TerminalTab } from '../../types/session';
 import { askConfirm } from '../../services/confirm';
 import {
   vaultGetEntry, vaultIsInitialized, vaultLookup, vaultSendSecret, writeTerminalInput, VaultLookup, VAULT_CHANGED_EVENT,
 } from '../../services/tauriBridge';
 import { isPrivilegeCommand, consoleLoginAction, TypedInput } from '../../services/promptDetect';
+import { consoleLoginState, ConsoleLoginState } from '../../services/consoleLogin';
 import { SESSION_SAVED_EVENT, SessionSavedDetail } from '../../services/appEvents';
 import { readClipboard, writeClipboard } from '../../services/clipboard';
 import { AddEventLog } from './TerminalLogDialogs';
@@ -165,10 +166,18 @@ export function useTerminalVault(tab: TerminalTab, isLocalSession: boolean, addE
   //  - Telnet/serial login: the device's Username:/Password: prompts, once
   //    each per connection.
   const typedRef = useRef<TypedInput>({ line: '', submitted: null });
-  const autoLoginSentRef = useRef({ user: false, password: false });
+  // Ref-shaped, but kept per tab for the whole connection (consoleLogin.ts):
+  // as plain refs they started over whenever the view remounted.
+  const autoLoginSentRef = useMemo(() => ({
+    get current() { return consoleLoginState(tab.id).sent; },
+    set current(v: ConsoleLoginState['sent']) { consoleLoginState(tab.id).sent = v; },
+  }), [tab.id]);
   // The user has run a command in this connection: automatic console login
   // is over (promptDetect.ts, consoleLoginAction).
-  const commandRunRef = useRef(false);
+  const commandRunRef = useMemo(() => ({
+    get current() { return consoleLoginState(tab.id).commandRun; },
+    set current(v: boolean) { consoleLoginState(tab.id).commandRun = v; },
+  }), [tab.id]);
   // Returns true when it answered, so the manual Send chip stays hidden.
   const autoRespondRef = useRef<(kind: 'login' | 'enable' | null, recent: string) => boolean>(() => false);
   autoRespondRef.current = (kind, recent) => {

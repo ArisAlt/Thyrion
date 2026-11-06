@@ -249,7 +249,20 @@ export async function readPuttySession(name: string): Promise<PuttySession | nul
   return found ? normalizeSession(found) : null;
 }
 
+/** Saves a session; false when it couldn't be (the reason is logged). */
 export async function writePuttySession(session: PuttySession): Promise<boolean> {
+  try {
+    await savePuttySession(session);
+    return true;
+  } catch (e) {
+    console.error('Failed to write session via Tauri:', e);
+    return false;
+  }
+}
+
+/** Saves a session, or throws the backend's reason it wasn't saved: the
+ *  session editor stays open and shows it. */
+export async function savePuttySession(session: PuttySession): Promise<void> {
   const extra = { ...(session.extra || {}) };
   if (session.folder) {
     extra.PlinkyFolder = session.folder;
@@ -279,14 +292,9 @@ export async function writePuttySession(session: PuttySession): Promise<boolean>
     extra,
   };
   if (isTauriEnvironment()) {
-    try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      await invoke('write_putty_session', { session: payload });
-      return true;
-    } catch (e) {
-      console.error("Failed to write session via Tauri:", e);
-      return false;
-    }
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('write_putty_session', { session: payload });
+    return;
   }
   const idx = DEMO_SESSIONS.findIndex(s => s.name === session.name);
   if (idx >= 0) {
@@ -294,7 +302,6 @@ export async function writePuttySession(session: PuttySession): Promise<boolean>
   } else {
     DEMO_SESSIONS.push(normalizeSession({ ...session, ...payload, folder: session.folder, tags: session.tags }));
   }
-  return true;
 }
 
 /**

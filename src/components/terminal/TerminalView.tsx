@@ -50,6 +50,7 @@ import { useTerminalTheme, findTerminalTheme } from '../../themes/terminalThemes
 import { useScrollback } from '../../services/scrollback';
 import { startGpuRenderer, useGpuRendering } from '../../services/renderer';
 import { noteTerminalFocus, shortcutIsFor } from '../../services/terminalKeys';
+import { resetConsoleLogin, forgetConsoleLogin } from '../../services/consoleLogin';
 import { newId } from '../../services/ids';
 import { VaultUnlockDialog } from '../vault/VaultUnlockDialog';
 import { HostKeyDialog, storedFingerprint } from './HostKeyDialog';
@@ -59,7 +60,7 @@ import { TerminalSearchBar } from './TerminalSearchBar';
 import { TerminalHeader } from './TerminalHeader';
 import { registerLinks } from './terminalLinks';
 import { registerShellIntegration, jumpToPrompt } from './shellIntegration';
-import { readOutputStatus } from '../../services/outputStatus';
+import { readOutputStatus, reconnectsAfterEnd } from '../../services/outputStatus';
 import { useTerminalVault } from './useTerminalVault';
 import { useTerminalPaste, listenForPastes } from './useTerminalPaste';
 import { useAutoReconnect } from './useAutoReconnect';
@@ -262,7 +263,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     enableNotice, setEnableNotice, copiedVaultKey, refreshVault,
     handleSendVaultPassword, handleSendVaultEnablePassword, requestEnablePassword, requestEnableRef, afterUnlock,
     handleCopyVaultPassword, handleCopyVaultEnablePassword,
-    typedRef, autoLoginSentRef, commandRunRef, autoRespondRef,
+    typedRef, commandRunRef, autoRespondRef,
   } = useTerminalVault(tab, isLocalSession, addEventLog);
 
   // When plink was started and nothing has come back yet. An unreachable
@@ -306,6 +307,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const isSerial = tab.protocol === 'Serial';
   const { pasteDelayRef, pasteJob, deliverTypedPaste, pasteFromClipboard, pasteActionsRef } = useTerminalPaste({
     tab, isSerial, isLivePtyRef, terminalRef, addEventLog, detectedPasswordPrompt, recentOutputRef,
+    // A paste that goes line by line skips xterm, where typed commands are
+    // seen: its lines are commands run too, or the console's password
+    // could go to a Password: one of them started (an ssh).
+    onCommandsSent: () => { commandRunRef.current = true; },
   });
 
   // Locked read only (tab menu): keys are dropped here, and the backend
@@ -566,7 +571,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       // prompt split across chunks, or IOS's "enable" then "Password:", is seen.
       recentOutputRef.current = appendRecentOutput(recentOutputRef.current, text);
       const promptKind = classifyPasswordPrompt(recentOutputRef.current);
-      const answeredAutomatically = autoRespondRef.current(promptKind, recentOutputRef.current);
+      // Never from replayed output: the prompt in it may be long answered,
+      // or belong to something started since (an ssh from the console).
+      const answeredAutomatically = live && autoRespondRef.current(promptKind, recentOutputRef.current);
 
       const hint = live ? fatalHint(text, tab.hostname, tab.port) : null;
       if (hint) term.writeln(`\x1b[33m[Thyrion: ${hint}]\x1b[0m`);
@@ -587,12 +594,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         onUpdateTab(tab.id, { status: 'disconnected' });
         showPrompt(null);
         // A FATAL ERROR after the session was live is a dropped connection
-        // ("Remote side unexpectedly closed", "Network error: ..."). A clean
-        // `exit` prints no FATAL, and a failed login never reached live --
-        // neither reconnects on its own.
+        // ("Remote side unexpectedly closed", "Network error: ..."), and so
+        // is one during the retries after it (outputStatus.ts). A clean
+        // `exit` prints no FATAL, and a first login that failed doesn't
+        // reconnect on its own.
         const networkProtocol = !tab.protocol || tab.protocol === 'SSH' || tab.protocol === 'Telnet';
-        if (text.includes('FATAL ERROR:') && reachedLiveRef.current && autoReconnectRef.current && networkProtocol) {
-          reachedLiveRef.current = false;
+        if (reconnectsAfterEnd({
+          autoReconnect: autoReconnectRef.current, networkProtocol, recent: recentOutputRef.current,
+          reachedLive: reachedLiveRef.current, attempts: reconnectAttemptRef.current,
+        })) {
           scheduleAutoReconnectRef.current();
         }
         reachedLiveRef.current = false;
@@ -740,8 +750,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       reachedLiveRef.current = false; // a new login, shown as one
       endedRef.current = false; // a new process
       typedRef.current = { line: '', submitted: null };
-      autoLoginSentRef.current = { user: false, password: false };
-      commandRunRef.current = false; // a new connection logs in again
+      resetConsoleLogin(tab.id); // a new connection logs in again
       setDetectedPasswordPrompt(null);
       term.writeln(deferredRef.current ? '\x1b[33m[Thyrion: Connecting...]\x1b[0m' : '\r\n\x1b[33m[Thyrion: Reconnecting...]\x1b[0m');
       deferredRef.current = false;
@@ -947,6 +956,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       // scrollback rather than wait for acknowledgements (ADR-006).
       acker.dispose();
       if (!isSessionClosed(tab.id)) void detachTerminalSession(tab.id);
+      else forgetConsoleLogin(tab.id);
       shellIntegration.dispose();
       disposed = true;
       highlightScans.dispose();

@@ -59,7 +59,7 @@ describe('NewSessionModal Component', () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it('renders standard SSH session fields and saves properly', () => {
+  it('renders standard SSH session fields and saves properly', async () => {
     const onSave = vi.fn();
     const onClose = vi.fn();
 
@@ -91,7 +91,35 @@ describe('NewSessionModal Component', () => {
         protocol: 'SSH',
       })
     );
-    expect(onClose).toHaveBeenCalled();
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it('saves a serial session at 115200 baud: the speed in SerialSpeed, not the port', async () => {
+    // The speed also went in the port, a 16-bit number on the backend:
+    // 115200 and every faster speed couldn't be saved.
+    const onSave = vi.fn();
+    render(<NewSessionModal isOpen={true} onClose={vi.fn()} onSave={onSave} />);
+    fireEvent.change(screen.getByLabelText(/^Connection Protocol$/i), { target: { value: 'Serial' } });
+    await waitFor(() => expect(screen.getByText(/● \/dev\/ttyUSB0/)).toBeDefined());
+    fireEvent.change(screen.getByLabelText(/^Speed \(Baud\)$/i), { target: { value: '115200' } });
+    fireEvent.change(screen.getByLabelText(/^Session name$/i), { target: { value: 'Console 115k' } });
+    fireEvent.click(screen.getByRole('button', { name: /^save session$/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    const saved = onSave.mock.calls[0][0];
+    expect(saved.extra.SerialSpeed).toBe('115200');
+    expect(saved.port).toBeLessThanOrEqual(65535);
+  });
+
+  it('stays open and says why when the session could not be saved', async () => {
+    // It closed as if saved: the session and every change were gone.
+    const onSave = vi.fn().mockRejectedValue('PuTTY session store is read-only');
+    const onClose = vi.fn();
+    render(<NewSessionModal isOpen={true} onClose={onClose} onSave={onSave} />);
+    fireEvent.change(screen.getByLabelText(/^Session name$/i), { target: { value: 'Web-02' } });
+    fireEvent.change(screen.getByPlaceholderText(/192\.0\.2\.10/i), { target: { value: '10.0.0.11' } });
+    fireEvent.click(screen.getByRole('button', { name: /^save session$/i }));
+    expect((await screen.findByRole('alert')).textContent).toMatch(/wasn't saved: PuTTY session store is read-only/);
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it('switches to Serial protocol, lists detected USB ports, and saves PuTTY Serial keys', async () => {

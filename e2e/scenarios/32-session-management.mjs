@@ -141,7 +141,9 @@ export const tests = [
     await fillEditor(app, { protocol: 'Telnet', host: '127.0.0.1', port: a.port, name: 'Branch R1' });
     await save(app);
     await waitForRow(app, 'Branch R1');
-    assert.equal(await editorOpen(app), false, 'the editor closes on save');
+    // Waited for: the editor closes once the save is done and the list is
+    // read again, a moment after PuTTY's store has the session.
+    await waitUntil(async () => !(await editorOpen(app)), { what: 'the editor to close on save', timeoutMs: 3000 });
     const s = await stored(app, 'Branch R1');
     assert.ok(s, 'saved in PuTTY\'s store');
     assert.deepEqual(
@@ -316,7 +318,9 @@ export const tests = [
     await sleep(50);
     await app.run((e) => e.click([...document.querySelectorAll('[role="dialog"] button[type="submit"]')].find((x) => x.textContent.trim() === 'Create')));
     await waitForRow(app, 'Vaulted R9', 15000);
-    assert.equal(await editorOpen(app), false, 'the editor closes on save');
+    // Waited for: the editor closes once the save is done and the list is
+    // read again, a moment after PuTTY's store has the session.
+    await waitUntil(async () => !(await editorOpen(app)), { what: 'the editor to close on save', timeoutMs: 3000 });
     const s = await stored(app, 'Vaulted R9');
     assert.equal(s.extra?.PlinkyVaultKey, 'session:Vaulted R9');
     assert.ok(!Object.values(s.extra ?? {}).includes('en4ble'), 'the password is not in the session file');
@@ -338,7 +342,9 @@ export const tests = [
     await fillEditor(app, { host: '192.0.2.31' });
     await save(app);
     await waitUntil(async () => (await stored(app, 'Vaulted R9'))?.host_name === '192.0.2.31', { what: 'the new host saved', timeoutMs: 3000 });
-    assert.equal(await editorOpen(app), false, 'the editor closes on save');
+    // Waited for: the editor closes once the save is done and the list is
+    // read again, a moment after PuTTY's store has the session.
+    await waitUntil(async () => !(await editorOpen(app)), { what: 'the editor to close on save', timeoutMs: 3000 });
     assert.equal(await app.run(() => !!document.getElementById('vault-unlock-password')), false, 'no master password asked');
     assert.equal((await stored(app, 'Vaulted R9')).extra?.PlinkyVaultKey, 'session:Vaulted R9', 'the vault entry is still linked');
     assert.equal(await app.invoke('vault_is_unlocked'), false);

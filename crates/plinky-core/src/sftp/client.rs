@@ -373,7 +373,8 @@ impl PsftpClient {
     /// psftp writes into the destination as it goes, so a transfer that
     /// fails halfway -- or overwrites an existing file -- would leave a
     /// truncated file under the real name. It downloads to a sibling
-    /// ".thyrion-part" file and renames it into place only on success.
+    /// temporary file of its own (`reserve_part_file`) and renames it into
+    /// place only on success.
     pub async fn download_file(
         session_name: &str,
         remote_path: &str,
@@ -389,7 +390,9 @@ impl PsftpClient {
         if dest.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
             return Err(PlinkyError::ProcessError(format!("Refusing download path with '..': {local_path}")));
         }
-        let part = format!("{local_path}.thyrion-part");
+        let part = reserve_part_file(dest)
+            .map_err(|e| PlinkyError::ProcessError(format!("Couldn't create a file to download into next to {local_path}: {e}")))?;
+        let part = part.to_string_lossy().into_owned();
         let script = format!(
             "get {} {}\n",
             Self::escape_psftp_path(remote_path),
@@ -613,6 +616,29 @@ impl PsftpPasswordGuard {
     }
 }
 
+/// A new, empty file next to `dest` for a download to go into, created here
+/// so nothing else has it. It was always "<name>.thyrion-part": a file of
+/// that name the user had was overwritten, or deleted when the download
+/// failed, and two downloads of the same file wrote into one another.
+/// Only this file is renamed into place or removed afterwards.
+///
+/// Its name doesn't carry the destination's: with a process id and a count
+/// added, a long file name (242 bytes) went over the 255-byte limit and the
+/// download failed before it started.
+fn reserve_part_file(dest: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = dest.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    loop {
+        let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let part = dir.join(format!(".thyrion-download-{}-{n}.part", std::process::id()));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&part) {
+            Ok(_) => return Ok(part),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -728,5 +754,33 @@ mod describe_failure_tests {
     fn a_new_key_still_says_to_accept_it_in_a_terminal() {
         let m = describe_failure("", "The host key is not cached for this server:\nFATAL ERROR: Cannot confirm a host key in batch mode\n");
         assert!(m.contains("isn't trusted yet"), "{m}");
+    }
+
+    #[test]
+    fn a_download_never_touches_a_file_already_called_name_thyrion_part() {
+        let dir = std::env::temp_dir().join(format!("thyrion-part-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("report.txt");
+        let theirs = dir.join("report.txt.thyrion-part");
+        std::fs::write(&theirs, b"the user's own file").unwrap();
+        let a = reserve_part_file(&dest).unwrap();
+        let b = reserve_part_file(&dest).unwrap();
+        assert_ne!(a, theirs);
+        assert_ne!(a, b, "two downloads of one file get a file each");
+        assert_eq!(a.parent(), Some(dir.as_path()), "next to the destination, so the rename stays on one disk");
+        assert_eq!(std::fs::read(&theirs).unwrap(), b"the user's own file");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_download_with_a_long_file_name_gets_a_file_to_go_into() {
+        // The destination's name was part of the temporary one: at 242
+        // bytes, with a process id and a count added, it went over 255.
+        let dir = std::env::temp_dir().join(format!("thyrion-long-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join(format!("{}.txt", "x".repeat(250)));
+        let part = reserve_part_file(&dest).unwrap();
+        assert!(part.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

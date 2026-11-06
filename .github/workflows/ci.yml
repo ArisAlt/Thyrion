@@ -50,7 +50,10 @@ jobs:
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+          # The newest 22.x, not whatever the runner has cached: jsdom 30 needs
+          # ^22.22.2 (and Vitest 5 ^22.12.0).
+          check-latest: true
           cache: 'npm'
 
       - name: Install npm dependencies
@@ -58,6 +61,11 @@ jobs:
 
       - name: Verify Frontend Compilation
         run: npm run build
+
+      # The page's unit tests (src/test, Vitest). CI ran only the e2e
+      # runner's own checks, so these never ran on a pull request.
+      - name: Run Frontend Unit Tests
+        run: npm test
 
       - name: Run Cargo Workspace Tests
         run: cargo test --workspace --verbose --no-fail-fast
@@ -99,7 +107,10 @@ jobs:
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+          # The newest 22.x, not whatever the runner has cached: jsdom 30 needs
+          # ^22.22.2 (and Vitest 5 ^22.12.0).
+          check-latest: true
           cache: 'npm'
 
       - name: Install npm dependencies
@@ -107,6 +118,11 @@ jobs:
 
       - name: Verify Frontend Compilation
         run: npm run build
+
+      # The page's unit tests (src/test, Vitest). CI ran only the e2e
+      # runner's own checks, so these never ran on a pull request.
+      - name: Run Frontend Unit Tests
+        run: npm test
 
       - name: Run Cargo Workspace Tests
         run: cargo test --workspace --verbose --no-fail-fast
