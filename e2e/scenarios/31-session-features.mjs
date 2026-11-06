@@ -155,8 +155,11 @@ export const tests = [
       return !!document.querySelector('[data-testid="session-look-preview"]');
     }, [], { what: 'the Appearance tab with its preview' });
     const previewBg = () => app.run(() => getComputedStyle(document.querySelector('[data-testid="session-look-preview"]')).backgroundColor);
-    // The session was set to Classic Light earlier: a white preview.
-    assert.equal(await previewBg(), 'rgb(255, 255, 255)');
+    // The session was set to Classic Light earlier: a white preview. Waited
+    // for: the editor opens with the session as listed, and the list reloads
+    // from PuTTY's store a moment after that save (on CI, after this opened).
+    await app.waitFor(() => getComputedStyle(document.querySelector('[data-testid="session-look-preview"]')).backgroundColor === 'rgb(255, 255, 255)',
+      [], { what: 'the Classic Light preview', timeoutMs: 3000 });
     await app.run(() => {
       const sel = document.getElementById('session-look-scheme');
       Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(sel, 'putty');

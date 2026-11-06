@@ -25,6 +25,11 @@ pub enum PlinkyError {
 
     #[error("Vault error: {0}")]
     VaultError(String),
+
+    /// The session has more input waiting than it takes (`PtyWriter`): the
+    /// write was refused, not queued. Writers that can wait try again.
+    #[error("The session isn't taking input fast enough: {0} KB are still waiting")]
+    InputBusy(usize),
 }
 
 pub type Result<T> = std::result::Result<T, PlinkyError>;
