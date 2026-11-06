@@ -218,7 +218,8 @@ export const App: React.FC = () => {
   }, [startupDone, layoutMode, activeTabId, tabs, paneSlots]);
 
   // The list only. loadSessions also restores the saved tab layout, which
-  // must happen once at startup, not after every delete or duplicate.
+  // must happen once at startup, not after every save, move, delete or
+  // duplicate.
   const reloadSessions = async () => setSessions(await listPuttySessions());
 
   const loadSessions = async () => {
@@ -533,9 +534,12 @@ export const App: React.FC = () => {
   };
 
   // Throws when the session wasn't saved: the editor stays open and says why.
+  // The list only: loadSessions also restores the startup layout, which
+  // replaced the open tabs and lost what they hold (a locked tab showed no
+  // unlock while the backend still refused its input).
   const handleSaveSession = async (newSession: PuttySession) => {
     await savePuttySession(newSession);
-    await loadSessions();
+    await reloadSessions();
   };
 
   const handleEditSession = (session: PuttySession, section?: SessionTab) => {
@@ -572,7 +576,7 @@ export const App: React.FC = () => {
       folder,
       extra: { ...(session.extra || {}), PlinkyFolder: folder } 
     });
-    await loadSessions();
+    await reloadSessions();
   };
 
   const handleSplitPane = (direction: 'vertical' | 'horizontal') => {
