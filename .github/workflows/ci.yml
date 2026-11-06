@@ -51,6 +51,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          # The newest 22.x, not whatever the runner has cached: jsdom 30 needs
+          # ^22.22.2 (and Vitest 5 ^22.12.0).
+          check-latest: true
           cache: 'npm'
 
       - name: Install npm dependencies
@@ -105,6 +108,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          # The newest 22.x, not whatever the runner has cached: jsdom 30 needs
+          # ^22.22.2 (and Vitest 5 ^22.12.0).
+          check-latest: true
           cache: 'npm'
 
       - name: Install npm dependencies
