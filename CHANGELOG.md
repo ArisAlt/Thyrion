@@ -15,8 +15,36 @@ is also the notes on its page under
 - **Ctrl+F and Ctrl+Up/Down act in the terminal you're in.** Search opened
   in every split pane and every hidden tab at once, and the prompt jumps
   moved them all.
+- **Serial sessions save at 115200 baud and faster.** The speed also went
+  into the session's network port, which can't hold it, so the save was
+  refused.
+- **A session that couldn't be saved says so.** The settings window closed
+  as if it had worked; now it stays open and shows why.
+- **Saving or moving a session keeps your open tabs as they are.** It
+  reloaded the tabs saved at startup over them, and a locked tab lost its
+  unlock button.
+- **Text on screen can't end a session.** A log or file shown in a live
+  session with "FATAL ERROR:" in it marked the tab disconnected, and with
+  automatic reconnect on, Thyrion closed the connection and opened another.
+- **Automatic reconnect keeps trying.** It stopped after the first retry
+  that failed; it now makes every retry it's set to.
+- **SFTP downloads leave your files alone.** A file already named like the
+  download's temporary file was overwritten, or deleted when the download
+  failed; and a file with a very long name couldn't be downloaded.
 
 **Security**
+
+- **A console's password goes only to that console.** With "log in
+  automatically" on, the password could reach a host you had started from
+  the console (an `ssh`): after switching away from the tab and back, or
+  after pasting the commands that started it. Thyrion now answers only
+  what the console itself asks, for the whole connection.
+- **No password goes through a jump host from the file browser.** For a
+  session through an SSH jump host, the file browser could offer the final
+  host's password to the jump host; it now sends none there (log in to such
+  a host with a key to browse its files).
+- **Copying a vault password doesn't show it.** Copy put the password on
+  screen as well, and it stayed there after the clipboard was cleared.
 
 - **A content security policy for the app's window.** Only Thyrion's own
   code runs in it: a script from anywhere else is refused.
@@ -29,6 +57,9 @@ is also the notes on its page under
 - A [release checklist](docs/RELEASE-CHECKLIST.md) for what only real
   devices show: serial over FTDI and Cisco's USB console, the GPU renderer,
   telnet and SSH on Windows.
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md): how Thyrion is built, where a
+  password may go, and the known design debt with what to change next.
+- CI runs the page's unit tests on every pull request.
 
 ## v0.2.17
 
