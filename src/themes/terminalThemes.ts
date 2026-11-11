@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { ITheme } from '@xterm/xterm';
-import { findUiTheme, getUiTheme, mix, type Palette } from './uiThemes';
+import { findUiTheme, getUiTheme, mix, ensure, type Palette } from './uiThemes';
 
 // Terminal colour schemes, separate from the interface theme. The list is the
 // defaults of the terminals Thyrion's users come from (PuTTY, Windows
@@ -129,10 +129,19 @@ const hexA = (c: string, a: number) => {
 export function schemeFromPalette(id: string, name: string, p: Palette, light: boolean): TerminalTheme {
   // Bright colours step toward the text: lighter on dark themes, darker on
   // light ones, so they stay readable on the background either way.
-  const bright = (c: string) => mix(c, light ? p.fg : '#ffffff', 0.25);
+  // The palette's colours are picked for the interface's panels; on the
+  // terminal's background some fell short (Classic Light's blue at 3.95,
+  // Classic Grey's yellow at 4.37). Each is moved toward the text until it
+  // reads at 4.5:1 there.
+  const readable = (c: string) => ensure(c, p.bg, 4.5, light ? p.fg : '#ffffff');
+  const bright = (c: string) => readable(mix(c, light ? p.fg : '#ffffff', 0.25));
+  // ANSI black is the panel colour on a dark theme. On a light one that's
+  // white: black text (prompts, `ls` colours) vanished at 1.1:1. It takes
+  // the text colour there, as light terminals do.
+  const black = light ? p.fg : p.surface;
   return scheme(id, name,
     { background: p.bg, foreground: p.fg, cursor: p.accent, selection: hexA(p.accent, 0.3) },
-    [p.surface, p.log_red, p.log_green, p.log_yellow, p.log_blue, p.log_magenta, p.log_cyan, mix(p.fg, p.muted, 0.35),
+    [black, readable(p.log_red), readable(p.log_green), readable(p.log_yellow), readable(p.log_blue), readable(p.log_magenta), readable(p.log_cyan), mix(p.fg, p.muted, 0.35),
       p.muted, bright(p.log_red), bright(p.log_green), bright(p.log_yellow), bright(p.log_blue), bright(p.log_magenta), bright(p.log_cyan), p.fg],
     light);
 }

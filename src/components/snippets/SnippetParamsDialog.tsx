@@ -34,6 +34,7 @@ export const SnippetParamsDialog: React.FC<SnippetParamsDialogProps> = ({ snippe
     >
       <form
         role="dialog"
+        aria-modal="true"
         aria-label={`Run ${snippet.name}`}
         onSubmit={submit}
         className="bg-plinky-900 border border-plinky-700 rounded-xl shadow-2xl max-w-md w-full p-5 text-slate-100 text-xs space-y-3"

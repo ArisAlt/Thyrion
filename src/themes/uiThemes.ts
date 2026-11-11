@@ -76,6 +76,16 @@ export function ensure(c: string, against: string, min: number, toward: string):
 }
 
 
+/** `c` pushed toward `toward` until it reaches `min`:1 on every one of
+ *  `backgrounds`. Text sits on the theme's surface, its window background,
+ *  its fields and its neutral panels; checked against the surface alone, a
+ *  light theme's status colours landed at 4.26-4.49 on the grey panels. */
+export function ensureOnAll(c: string, backgrounds: string[], min: number, toward: string): string {
+  let out = c;
+  for (let t = 0.05; backgrounds.some(b => contrast(out, b) < min) && t <= 1; t += 0.05) out = mix(c, toward, t);
+  return out;
+}
+
 // ── the current look, exactly ────────────────────────────────────────────────
 const TW: Record<(typeof SCALES)[number], Scale> = {
   slate: { 50: '#f8fafc', 100: '#f1f5f9', 200: '#e2e8f0', 300: '#cbd5e1', 400: '#94a3b8', 500: '#64748b', 600: '#475569', 700: '#334155', 800: '#1e293b', 900: '#0f172a', 950: '#020617' },
@@ -113,11 +123,14 @@ const PLINKY: UiTheme = {
 };
 
 // ── a palette, expanded ──────────────────────────────────────────────────────
+/** Every background text is drawn on (plinky-950, 900, 850, 800). */
+const textBackgrounds = (p: Palette) => [p.bg, p.surface, p.field, p.neutral];
+
 /** A state colour (success, warning, danger, channel A) as a scale: 400-500
  *  is the colour, lighter shades lean to the text colour (readable on the
  *  theme's background), darker ones sink into the background (tints). */
 function stateScale(c: string, p: Palette, base500 = c): Scale {
-  const text = (x: string) => ensure(x, p.surface, 4.5, p.fg);
+  const text = (x: string) => ensureOnAll(x, textBackgrounds(p), 4.5, p.fg);
   const s: Scale = {
     50: mix(c, p.fg, 0.85), 100: mix(c, p.fg, 0.7), 200: text(mix(c, p.fg, 0.5)), 300: text(mix(c, p.fg, 0.28)),
     400: text(c), 500: base500, 600: mix(base500, p.bg, 0.15), 700: mix(base500, p.bg, 0.3),
@@ -150,7 +163,7 @@ export function expandPalette(id: string, name: string, p: Palette): UiTheme {
   };
   const sky: Scale = {
     50: mix(p.accent, p.fg, 0.88), 100: mix(p.accent, p.fg, 0.75), 200: mix(p.accent, p.fg, 0.55),
-    300: ensure(mix(p.accent, p.fg, 0.35), p.surface, 4.5, p.fg), 400: ensure(mix(p.accent, p.fg, 0.15), p.surface, 4.5, p.fg), 500: p.accent,
+    300: ensureOnAll(mix(p.accent, p.fg, 0.35), textBackgrounds(p), 4.5, p.fg), 400: ensureOnAll(mix(p.accent, p.fg, 0.15), textBackgrounds(p), 4.5, p.fg), 500: p.accent,
     600: p.accent_hover, 700: fill(p.accent_active),
     800: mix(p.accent_active, p.bg, 0.35), 900: mix(p.accent_active, p.bg, 0.55), 950: mix(p.accent_active, p.bg, 0.75),
   };

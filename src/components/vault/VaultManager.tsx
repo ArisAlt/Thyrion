@@ -627,8 +627,8 @@ export const VaultManager: React.FC<VaultManagerProps> = ({ onClose }) => {
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2">
                 <span className="text-xs text-slate-400">Stored Credentials:</span>
-                <span className="text-xs font-mono font-medium text-sky-400 bg-sky-950/40 px-2 py-0.5 rounded border border-sky-800/40">
-                  {entries.length} items
+                <span className="text-xs font-mono font-medium text-sky-300 bg-sky-950/40 px-2 py-0.5 rounded border border-sky-800/40">
+                  {entries.length} {entries.length === 1 ? 'item' : 'items'}
                 </span>
               </div>
 

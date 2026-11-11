@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { SnippetItem } from '../../types/session';
 import { loadSnippets, saveSnippets, snippetParams, SnippetParam, loadRibbon, saveRibbon } from '../../services/snippets';
 import { placeName } from '../../services/sessionOrder';
@@ -67,6 +67,21 @@ export const QuickSnippetBar: React.FC<QuickSnippetBarProps> = ({
     setIsAddModalOpen(false);
     setEditingId(null);
   };
+
+  // Escape closes the editor, as it does every other window. Taken before
+  // the terminal and the app's own shortcuts see it.
+  useEffect(() => {
+    if (!isAddModalOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      setIsAddModalOpen(false);
+      setEditingId(null);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [isAddModalOpen]);
 
   const categories = ['All', 'System', 'Docker', 'Network', 'Logs', 'Custom'];
 
@@ -325,11 +340,13 @@ export const QuickSnippetBar: React.FC<QuickSnippetBarProps> = ({
       {/* Add Custom Snippet Modal */}
       {isAddModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-plinky-950/70 backdrop-blur-xs p-4 animate-in fade-in duration-150">
-          <div className="bg-plinky-900 border border-plinky-700 rounded-xl shadow-2xl max-w-md w-full p-5 text-slate-100">
+          {/* A modal dialog: while it's open the app's shortcuts (Ctrl+Tab,
+              Ctrl+Shift+W) don't act on the tabs behind it (App.tsx). */}
+          <div role="dialog" aria-modal="true" aria-labelledby="snippet-editor-title" className="bg-plinky-900 border border-plinky-700 rounded-xl shadow-2xl max-w-md w-full p-5 text-slate-100">
             <div className="flex items-center justify-between mb-4 border-b border-plinky-800 pb-2">
               <div className="flex items-center space-x-2">
                 <Sparkles className="w-4 h-4 text-slate-400" />
-                <h3 className="text-base font-semibold">{editingId ? 'Edit Quick Snippet' : 'Create Quick Snippet'}</h3>
+                <h3 id="snippet-editor-title" className="text-base font-semibold">{editingId ? 'Edit Quick Snippet' : 'Create Quick Snippet'}</h3>
               </div>
               <button aria-label="Close"
                 onClick={closeModal}

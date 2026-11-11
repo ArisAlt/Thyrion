@@ -4,6 +4,29 @@ What changed in each Thyrion release, newest first. Each version's section
 is also the notes on its page under
 [Releases](https://github.com/ArisAlt/Thyrion/releases).
 
+## v0.2.19
+
+**Fixed**
+
+- **Hints in text boxes are readable on the light themes.** About half the
+  boxes (passwords, the jump host, the vault's form, the SFTP filter,
+  terminal search) showed their hint in a fixed grey that no theme changed:
+  barely visible on Classic Light and Classic Grey. They follow the theme
+  now.
+- **Status colours are readable everywhere on the light themes.** Blue,
+  green, red and amber text fell just short on the grey panels and window
+  background; it was checked against the white surface only.
+- **Black text shows in the terminal on the light themes.** With "Match
+  interface", black was the same white as the background. Blue and yellow
+  text there were a little faint too.
+- **The snippet editor behaves like the other windows.** Escape closes it,
+  and Ctrl+Tab or Ctrl+Shift+W no longer act on the tabs behind it while you
+  type. The same goes for the snippet's values window and the two log
+  windows.
+- **The vault says "1 item"**, not "1 items".
+- **The pane's tab chooser in split view shows keyboard focus**, and screen
+  readers no longer read the status bar's separators.
+
 ## v0.2.18
 
 **Fixed**

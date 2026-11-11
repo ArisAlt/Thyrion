@@ -28,7 +28,7 @@ export const EventLogDialog: React.FC<{
   onClose: () => void;
 }> = ({ sessionName, logs, onCopyAll, onClear, onClose }) => (
   <div className="absolute inset-0 z-50 flex items-center justify-center bg-plinky-950/80 backdrop-blur-sm p-4 animate-in fade-in duration-150">
-    <div className="bg-plinky-900 border border-plinky-700 rounded-xl shadow-2xl max-w-2xl w-full flex flex-col max-h-[80vh] overflow-hidden text-slate-100">
+    <div role="dialog" aria-modal="true" aria-label={`Event Log: ${sessionName}`} className="bg-plinky-900 border border-plinky-700 rounded-xl shadow-2xl max-w-2xl w-full flex flex-col max-h-[80vh] overflow-hidden text-slate-100">
       <div className="px-4 py-3 bg-plinky-950 border-b border-plinky-800 flex items-center justify-between">
         <div className="flex items-center space-x-2">
           <List className="w-4 h-4 text-slate-400" />
@@ -93,7 +93,7 @@ export const SessionLogDialog: React.FC<{
   onClose: () => void;
 }> = ({ isLogging, loggedBytes, path, error, onCopyPath, onToggle, onClose }) => (
   <div className="absolute inset-0 z-50 flex items-center justify-center bg-plinky-950/80 backdrop-blur-sm p-4 animate-in fade-in duration-150">
-    <div className="bg-plinky-900 border border-plinky-700 rounded-xl shadow-2xl max-w-md w-full flex flex-col overflow-hidden text-slate-100">
+    <div role="dialog" aria-modal="true" aria-label="Session Log" className="bg-plinky-900 border border-plinky-700 rounded-xl shadow-2xl max-w-md w-full flex flex-col overflow-hidden text-slate-100">
       <div className="px-4 py-3 bg-plinky-950 border-b border-plinky-800 flex items-center justify-between">
         <div className="flex items-center space-x-2">
           <FileText className="w-4 h-4 text-slate-400" />
