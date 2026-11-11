@@ -43,6 +43,14 @@
   button:not(:disabled):active {
     transform: scale(0.97);
   }
+  /* A field that names no placeholder colour got Tailwind's own grey
+     (#9ca3af), which no theme changes: on the light themes a hint read at
+     2.5:1 on white and 1.65:1 on Classic Grey. The theme's secondary text
+     instead, which clears 4.5:1 on every surface. */
+  input::placeholder,
+  textarea::placeholder {
+    color: rgb(var(--c-plinky-muted, 142 155 176));
+  }
 }
 
 /* A theme switch changes ~60 colour variables at once, and every button

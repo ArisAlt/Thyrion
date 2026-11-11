@@ -45,6 +45,10 @@ describe('interface themes', () => {
     ['sky-300', 'plinky-900'], ['sky-400', 'plinky-900'],
     ['on-accent', 'sky-700'], ['on-danger', 'rose-700'], ['amber-950', 'amber-500'],
     ['emerald-400', 'plinky-900'], ['amber-400', 'plinky-900'], ['rose-400', 'plinky-900'],
+    // Status and accent text on the other backgrounds it sits on: on the
+    // light themes the grey panels and window took them under AA.
+    ...['sky-300', 'sky-400', 'emerald-400', 'amber-400', 'rose-400', 'cyan-400'].flatMap(fg =>
+      ['plinky-950', 'plinky-850', 'plinky-800'].map(bg => [fg, bg] as [string, string])),
   ];
   for (const t of UI_THEMES) {
     it(`${t.name}: every text pair reaches WCAG AA`, () => {
@@ -160,6 +164,13 @@ describe('match interface', () => {
       applyUiTheme(ui.id, false);
       const { theme } = findTerminalTheme(MATCH_INTERFACE);
       expect(contrast(theme.foreground!, theme.background!)).toBeGreaterThanOrEqual(4.5);
+      // On a light theme, ANSI black was the white panel: black text vanished.
+      if (ui.light) expect(contrast(theme.black!, theme.background!)).toBeGreaterThanOrEqual(4.5);
+      // The six colours read at AA on the terminal's own background
+      // (Classic Light's blue was 3.95, Classic Grey's yellow 4.37).
+      for (const k of ['red', 'green', 'yellow', 'blue', 'magenta', 'cyan'] as const) {
+        expect(contrast(theme[k]!, theme.background!), `${k} ${theme[k]}`).toBeGreaterThanOrEqual(4.5);
+      }
     });
   }
 });
