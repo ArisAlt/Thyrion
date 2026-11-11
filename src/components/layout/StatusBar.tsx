@@ -41,7 +41,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({ tabs, activeTabId, broadca
 
         {activeTab && (
           <>
-            <span className="text-plinky-600">|</span>
+            <span className="text-plinky-600" aria-hidden>|</span>
             <span className="text-slate-300 truncate min-w-0">
               Current: <strong className="text-sky-300">{activeTab.sessionName}</strong>
               {activeTab.hostname && !activeTab.sessionName.includes(activeTab.hostname)
@@ -82,7 +82,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({ tabs, activeTabId, broadca
           })}
         </div>
 
-        <span className="text-plinky-600">|</span>
+        <span className="text-plinky-600" aria-hidden>|</span>
 
         {/* Design doc R3: plink verifies host keys; Thyrion never reads them
             out of terminal text. "R3 Safe (Zero Hostkey Scrape)" was that

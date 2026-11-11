@@ -677,7 +677,7 @@ export const App: React.FC = () => {
           value={tab?.id ?? ''}
           onChange={(e) => { if (e.target.value) putTabInPane(i, e.target.value); }}
           onClick={(e) => e.stopPropagation()}
-          className="min-w-[7rem] max-w-[16rem] bg-transparent font-semibold text-slate-200 hover:text-white focus:outline-none cursor-pointer truncate"
+          className="min-w-[7rem] max-w-[16rem] bg-transparent font-semibold text-slate-200 hover:text-white rounded focus:outline-none focus-visible:ring-1 focus-visible:ring-sky-400 cursor-pointer truncate"
         >
           {!tab && <option value="">Choose a tab</option>}
           {tabs.map(t => (
